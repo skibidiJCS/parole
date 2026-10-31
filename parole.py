@@ -35,6 +35,7 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
+from cleanup import remove_repeats
 from hotkey import Shortcut
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
@@ -81,6 +82,8 @@ class Parole(rumps.App):
         self.last_item = rumps.MenuItem("No dictation yet")
         self.fast_item = rumps.MenuItem("Fast mode", callback=self.toggle_fast)
         self.fast_item.state = True
+        self.repeats_item = rumps.MenuItem("Remove repeats", callback=self.toggle_repeats)
+        self.repeats_item.state = True
         self.menu = [
             self.status_item,
             self.last_item,
@@ -88,6 +91,7 @@ class Parole(rumps.App):
             rumps.MenuItem("Copy last dictation", callback=self.copy_last),
             rumps.MenuItem("Edit vocabulary…", callback=self.edit_vocabulary),
             self.fast_item,
+            self.repeats_item,
             None,
             rumps.MenuItem("Quit Parole", callback=self.quit),
         ]
@@ -133,6 +137,10 @@ class Parole(rumps.App):
         item.state = not item.state
         self.transcriber.fast = bool(item.state)
         log(f"Fast mode {'on' if item.state else 'off'}")
+
+    def toggle_repeats(self, item):
+        item.state = not item.state
+        log(f"Remove repeats {'on' if item.state else 'off'}")
 
     def copy_last(self, _):
         if self.last_text:
@@ -226,6 +234,8 @@ class Parole(rumps.App):
             self.show("idle", "Skipped: no speech detected")
             return
         text, language = self.transcriber.transcribe(speech, self.vocabulary.prompt())
+        if self.repeats_item.state:
+            text = remove_repeats(text)  # "I- I think we, we should" -> "I think we should"
         text = self.vocabulary.fix(text)
         transcribed_at = time.perf_counter()
         if not text:

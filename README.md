@@ -107,6 +107,14 @@ Synthetic test (macOS `say` voices, vocabulary `Jiacai, Parole, MLX, Ollama, Kub
 
 The full window benefits most; turn Fast mode off if accuracy on your jargon matters more than speed.
 
+## Remove repeats
+
+On by default (menu > **Remove repeats**). After transcription, stutters and phrases said twice in a row are dropped:
+"I- I think we should, we should leave." → "I think we should leave."; "Je je pense que, je pense que c'est bon." →
+"Je pense que c'est bon." Words that are normally doubled are kept ("nous nous", "vous vous", "had had", "very, very"),
+and so are repeats across sentences ("C'est vrai. C'est vrai."). Only exact repeats are caught: rephrasing in
+different words needs a language model (phase 6). Code: `cleanup.py`.
+
 ## Voice detection
 
 Before Whisper runs, Silero VAD (a ~2 MB model, 4-20 ms per dictation on one CPU core) checks whether anyone spoke.
@@ -133,6 +141,7 @@ fields) fall back to: add a space if the previous dictation went into the same a
 | `transcriber.py` | Whisper: fast short window, full 30 s window, long fallback   |
 | `voice.py`       | Silero VAD: skip silence/noise, trim around the speech        |
 | `vocabulary.py`  | your word list (Whisper prompt) and replacements              |
+| `cleanup.py`     | removes stutters and phrases said twice in a row              |
 | `spacing.py`     | adds a space between consecutive dictations                   |
 | `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration          |
 | `check_setup.py` | one-off setup and permissions check                           |
