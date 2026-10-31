@@ -85,6 +85,18 @@ The words are given to Whisper as a *prompt*: text it reads as if it came just b
 It's a hint, not a rule: it fixes words Whisper half-recognises, not words it can't hear at all.
 Keep the list to a few dozen entries (Whisper reads at most ~200 tokens of prompt).
 
+For a word Whisper keeps writing the same wrong way, add a **replacement** line:
+
+```
+Jack-eye -> Jiacai
+```
+
+It's applied after transcription, so it always works. Spaces, hyphens and capitals don't matter
+("Jack eye", "Jackeye", "JACK-EYE" all match), but only whole words: "Jack" alone is left alone.
+Add one line per wrong spelling you see; the right side is also added to the prompt.
+Names whose sound is far from their spelling need this: in a test, "Jiacai" in the prompt alone
+still came out as "Jack Isong".
+
 Synthetic test (macOS `say` voices, vocabulary `Jiacai, Parole, MLX, Ollama, Kubernetes, py2app, pynput, rumps`):
 
 | Said                                   | Without vocabulary (full)          | With vocabulary, full          | With vocabulary, fast         |
@@ -106,6 +118,11 @@ From Terminal, the log includes each transcript; Ctrl+C there also quits.
 
 Your clipboard is restored 200 ms after each paste; anything you copy in the meantime is kept.
 
+Consecutive dictations get a space between them. Before pasting, Parole asks the focused field (via Accessibility)
+which character is before the cursor: after a letter or punctuation it adds a space; at the start of a field,
+after a space/newline, or after an opening bracket or quote it doesn't. Apps that don't answer (some Electron/web
+fields) fall back to: add a space if the previous dictation went into the same app less than a minute ago.
+
 ## Files
 
 | File             | Role                                                          |
@@ -115,10 +132,12 @@ Your clipboard is restored 200 ms after each paste; anything you copy in the mea
 | `recorder.py`    | microphone capture into memory (16 kHz mono)                  |
 | `transcriber.py` | Whisper: fast short window, full 30 s window, long fallback   |
 | `voice.py`       | Silero VAD: skip silence/noise, trim around the speech        |
-| `vocabulary.py`  | your word list, turned into a Whisper prompt                  |
+| `vocabulary.py`  | your word list (Whisper prompt) and replacements              |
+| `spacing.py`     | adds a space between consecutive dictations                   |
 | `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration          |
 | `check_setup.py` | one-off setup and permissions check                           |
 | `setup.py`       | py2app build settings for Parole.app                          |
+| `icon/`          | app icon: `make_icon.py` draws `Parole.png` and `Parole.icns` |
 
 ## Latency notes (M4 Air, large-v3-turbo, synthetic `say` voices)
 

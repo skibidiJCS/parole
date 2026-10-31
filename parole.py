@@ -38,6 +38,7 @@ from PyObjCTools import AppHelper
 from hotkey import Shortcut
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
+from spacing import Spacer
 from transcriber import Transcriber
 from vocabulary import Vocabulary
 from voice import VoiceDetector
@@ -99,6 +100,7 @@ class Parole(rumps.App):
         self.voice = None  # loaded by the worker, with Whisper
         self.vocabulary = Vocabulary()
         self.vocabulary.ensure_file()
+        self.spacer = Spacer()
         self.shortcut = Shortcut(on_start=self.start_recording, on_stop=self.stop_recording)
 
     def run(self):
@@ -224,6 +226,7 @@ class Parole(rumps.App):
             self.show("idle", "Skipped: no speech detected")
             return
         text, language = self.transcriber.transcribe(speech, self.vocabulary.prompt())
+        text = self.vocabulary.fix(text)
         transcribed_at = time.perf_counter()
         if not text:
             log("Nothing recognized")
@@ -236,7 +239,8 @@ class Parole(rumps.App):
             # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
             if not self.shortcut.released.wait(timeout=2):
                 raise RuntimeError("release Shift and Right Command, then try again")
-            paste_sent_at = paste_text(text)
+            paste_sent_at = paste_text(self.spacer.prefix() + text)
+            self.spacer.pasted()
         except Exception as error:
             log(f"Paste failed: {error}")
             self.show("error", "Paste failed; use Copy last dictation", last=f"Last: {text[:40]}")
