@@ -5,9 +5,29 @@ import time
 from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
 from ApplicationServices import AXIsProcessTrusted
 from Foundation import NSData
-from pynput import keyboard
+from Quartz import (
+    CGEventCreateKeyboardEvent,
+    CGEventPost,
+    CGEventSetFlags,
+    kCGEventFlagMaskCommand,
+    kCGHIDEventTap,
+)
 
 PASTE_DELAY = 0.2  # Give the focused app time to read the temporary clipboard.
+V_KEY = 9  # macOS key code of the physical V key (same place on QWERTY and AZERTY)
+
+
+def send_cmd_v():
+    """Press and release V with Command held, straight through macOS (Quartz).
+
+    pynput's keyboard controller would first look up which key types "v" in
+    the current layout; macOS only allows that lookup on the main thread once
+    a menu bar app is running, and we paste from the worker thread.
+    """
+    for is_down in (True, False):
+        event = CGEventCreateKeyboardEvent(None, V_KEY, is_down)
+        CGEventSetFlags(event, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, event)
 
 
 def copy_items(pasteboard):
@@ -41,7 +61,6 @@ def paste_text(text):
     saved = copy_items(pasteboard)
     # If the clipboard changed while reading it, leave it alone.
     # copy_items has already materialized any lazily provided data.
-    controller = keyboard.Controller()
     if pasteboard.changeCount() != before_clear:
         raise RuntimeError("Clipboard changed; paste cancelled. Please try again.")
 
@@ -51,8 +70,7 @@ def paste_text(text):
         owned_change = pasteboard.changeCount()
         if not written:
             raise RuntimeError("Could not put the dictation on the clipboard.")
-        with controller.pressed(keyboard.Key.cmd):
-            controller.tap('v')
+        send_cmd_v()
         paste_sent_at = time.perf_counter()
         time.sleep(PASTE_DELAY)
         return paste_sent_at

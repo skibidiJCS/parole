@@ -1,13 +1,18 @@
-"""Parole, phase 3: hold Shift + Right Command, speak, release, paste into the focused app.
+"""Parole, phase 4: a menu bar app. Hold Shift + Right Command, speak, release,
+and the text is pasted into the focused app.
 
     .venv/bin/python parole.py
 
-Two threads are involved:
+Three threads are involved:
+  - The main thread belongs to AppKit (via rumps): it draws the menu bar icon
+    and the menu. macOS only allows UI changes from this thread, so the other
+    threads ask it to update the icon with AppHelper.callAfter().
   - pynput's listener thread gets key events and starts/stops the mic.
     It must stay fast, or macOS considers the key handler stuck.
-  - The main thread waits for finished recordings and transcribes them,
-    so a slow transcription never blocks the keyboard.
-A queue hands recordings from the first thread to the second.
+  - A worker thread loads the Whisper model, then waits for recordings and
+    transcribes + pastes them. MLX wants the model used from the thread that
+    loaded it, so all Whisper work happens here.
+A queue hands recordings from the listener thread to the worker.
 """
 
 import queue
@@ -15,139 +20,216 @@ import threading
 import time
 
 import numpy as np
-from pynput import keyboard
+import rumps
+from AppKit import (
+    NSApplication,
+    NSApplicationActivationPolicyAccessory,
+    NSColor,
+    NSImage,
+    NSPasteboard,
+    NSPasteboardTypeString,
+)
+from PyObjCTools import AppHelper
 
+from hotkey import Shortcut
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
 from transcriber import Transcriber
 
-HOTKEY = keyboard.Key.cmd_r  # Right Command
-SHIFT_KEYS = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
-held_keys = set()
-hotkey_released = threading.Event()
-hotkey_released.set()
 MIN_SECONDS = 0.3  # shorter presses are treated as accidental
 SILENCE_RMS = 0.002  # below this average loudness, nobody spoke
+READY = "Ready: hold ⇧ + right ⌘ and speak"
 
-recorder = Recorder()
-recordings = queue.Queue()  # items: (audio, time the key was released)
-is_recording = False
-
-
-def on_press(key):
-    global is_recording
-    if key != HOTKEY and key not in SHIFT_KEYS:
-        return
-    held_keys.add(key)
-    hotkey_released.clear()
-    # Holding a key makes macOS repeat the press event; only react to the first.
-    if HOTKEY not in held_keys or not (held_keys & SHIFT_KEYS) or is_recording:
-        return
-    try:
-        recorder.start()
-    except Exception as error:
-        print(f"Could not open the microphone: {error}")
-        return
-    is_recording = True
-    print("Recording...", flush=True)
+# SF Symbols (the icon set macOS itself uses) for each state.
+ICONS = {
+    "loading": "hourglass",
+    "idle": "mic",
+    "recording": "mic.fill",
+    "transcribing": "waveform",
+    "error": "exclamationmark.triangle",
+}
 
 
-def on_release(key):
-    global is_recording
-    held_keys.discard(key)
-    if HOTKEY not in held_keys and not (held_keys & SHIFT_KEYS):
-        hotkey_released.set()
-    # Either half of the shortcut ending stops the recording.
-    if not is_recording or (HOTKEY in held_keys and held_keys & SHIFT_KEYS):
-        return
-    released_at = time.perf_counter()
-    try:
-        audio = recorder.stop()
-    except Exception as error:
-        print(f"Could not finish recording: {error}", flush=True)
-        return
-    finally:
-        is_recording = False
-    recordings.put((audio, released_at))
+def log(message):
+    print(time.strftime("%H:%M:%S"), message, flush=True)
 
 
 def check_audio(audio):
     """Return None if the audio is worth transcribing, else the reason it isn't."""
     seconds = len(audio) / SAMPLE_RATE
     if seconds < MIN_SECONDS:
-        return f"too short ({seconds:.2f}s), hold the key while you speak"
+        return f"too short ({seconds:.2f}s), hold the keys while you speak"
     if not audio.any():
         # macOS hands out pure zeros instead of an error when access is denied.
-        return "the mic only gives silence: allow your terminal in Settings > Privacy & Security > Microphone"
+        return "the mic only gives silence; allow Microphone access in Privacy & Security"
     if np.sqrt(np.mean(audio**2)) < SILENCE_RMS:
         return "nothing heard (too quiet)"
     return None
 
 
-def main():
-    print("Loading the Whisper model...")
-    transcriber = Transcriber()
-    start = time.perf_counter()
-    try:
-        transcriber.warm_up()
-    except Exception as error:
-        print(f"Could not load the offline model: {error}")
-        print("Run check_setup.py to check the installation and model cache.")
-        return
-    print(f"Model ready in {time.perf_counter() - start:.1f}s")
+class Parole(rumps.App):
+    def __init__(self):
+        super().__init__("Parole", quit_button=None)
+        # Items without a callback are greyed out: they're status lines.
+        self.status_item = rumps.MenuItem("Loading the speech model…")
+        self.last_item = rumps.MenuItem("No dictation yet")
+        self.fast_item = rumps.MenuItem("Fast mode", callback=self.toggle_fast)
+        self.fast_item.state = True
+        self.menu = [
+            self.status_item,
+            self.last_item,
+            None,  # separator
+            rumps.MenuItem("Copy last dictation", callback=self.copy_last),
+            self.fast_item,
+            None,
+            rumps.MenuItem("Quit Parole", callback=self.quit),
+        ]
 
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
-    if not listener.IS_TRUSTED:
-        print("Warning: Accessibility is not granted. Automatic pasting is unavailable.")
-        print("Enable Terminal in Settings > Privacy & Security > Device Control and Data Access (Accessibility).")
-        print("Also enable Input Monitoring, then quit Terminal with Cmd+Q and reopen it.")
+        self.recorder = Recorder()
+        self.recordings = queue.Queue()  # items: (audio, time the keys were released)
+        self.is_recording = False
+        self.last_text = ""  # kept in memory only, for "Copy last dictation"
+        self.transcriber = Transcriber()
+        self.shortcut = Shortcut(on_start=self.start_recording, on_stop=self.stop_recording)
 
-    print("Hold Shift + Right Command and speak. Release either key to stop. Ctrl+C to quit.\n")
-    try:
-        while True:
-            audio, released_at = recordings.get()  # waits, using no CPU
-            problem = check_audio(audio)
-            if problem:
-                print(f"Skipped: {problem}\n")
-                continue
+    def run(self):
+        # Menu bar only: no Dock icon, and the app never takes focus from the
+        # app you're dictating into.
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        threading.Thread(target=self.work, daemon=True).start()
+        super().run()
 
-            transcribe_start = time.perf_counter()
-            try:
-                text, language = transcriber.transcribe(audio)
-            except Exception as error:
-                print(f"Could not transcribe this recording: {error}\n")
-                continue
-            transcribed_at = time.perf_counter()
+    # --- UI (any thread can call show; _show runs on the main thread) -------
 
-            print(f"[{language}] {text or '(no words recognized)'}")
-            if not text:
-                continue
-            try:
-                # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
-                if not hotkey_released.wait(timeout=2):
-                    raise RuntimeError("Release Shift and Right Command, then try again.")
-                paste_sent_at = paste_text(text)
-            except Exception as error:
-                print(f"Paste failed: {error}")
-                print("The transcription is printed above; you can copy it manually.\n")
-                continue
-            print(
-                f"  audio {len(audio) / SAMPLE_RATE:.1f}s | "
-                f"latency {(paste_sent_at - released_at) * 1000:.0f} ms "
-                f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms, "
-                f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)\n"
-            )
-    except KeyboardInterrupt:
-        print("\nBye.")
-    finally:
-        listener.stop()
-        # Ctrl+C can arrive while the hotkey is still held. Close the mic too.
+    def show(self, state, status=None, last=None):
+        AppHelper.callAfter(self._show, state, status, last)
+
+    def _show(self, state, status, last):
+        button = self._nsapp.nsstatusitem.button()
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(ICONS[state], f"Parole: {state}")
+        image.setTemplate_(True)  # let macOS colour it to match the menu bar
+        button.setImage_(image)
+        button.setTitle_("")
+        button.setContentTintColor_(NSColor.systemRedColor() if state == "recording" else None)
+        if status:
+            self.status_item.title = status
+        if last:
+            self.last_item.title = last
+
+    # --- Menu callbacks (main thread) --------------------------------------
+
+    def toggle_fast(self, item):
+        item.state = not item.state
+        self.transcriber.fast = bool(item.state)
+        log(f"Fast mode {'on' if item.state else 'off'}")
+
+    def copy_last(self, _):
+        if self.last_text:
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(self.last_text, NSPasteboardTypeString)
+
+    def quit(self, _):
+        self.shortcut.stop()
         try:
-            recorder.stop()
+            self.recorder.stop()  # in case Quit is clicked mid-recording
         except Exception as error:
-            print(f"Could not close the microphone: {error}")
+            log(f"Could not close the microphone: {error}")
+        rumps.quit_application()
+
+    # --- Shortcut callbacks (pynput's thread: keep them quick) -------------
+
+    def start_recording(self):
+        try:
+            self.recorder.start()
+        except Exception as error:
+            log(f"Could not open the microphone: {error}")
+            self.show("error", "Microphone unavailable; check Privacy & Security > Microphone")
+            return
+        self.is_recording = True
+        self.show("recording", "Recording…")
+
+    def stop_recording(self):
+        if not self.is_recording:
+            return
+        released_at = time.perf_counter()
+        try:
+            audio = self.recorder.stop()
+        except Exception as error:
+            log(f"Could not finish recording: {error}")
+            self.show("error", "Recording failed; try again")
+            return
+        finally:
+            self.is_recording = False
+        self.show("transcribing", "Transcribing…")
+        self.recordings.put((audio, released_at))
+
+    # --- Worker thread -----------------------------------------------------
+
+    def work(self):
+        self.show("loading")
+        log("Loading the Whisper model...")
+        start = time.perf_counter()
+        try:
+            self.transcriber.warm_up()
+        except Exception as error:
+            log(f"Could not load the offline model: {error}")
+            self.show("error", "Speech model failed to load; run check_setup.py")
+            return
+        log(f"Model ready in {time.perf_counter() - start:.1f}s")
+
+        # Only listen to the keyboard once we can actually transcribe.
+        self.shortcut.start()
+        if self.shortcut.trusted:
+            self.show("idle", READY)
+        else:
+            log("Accessibility is not granted: the shortcut and pasting won't work.")
+            self.show("error", "Needs Accessibility + Input Monitoring permission")
+
+        while True:
+            audio, released_at = self.recordings.get()  # waits, using no CPU
+            try:
+                self.dictate(audio, released_at)
+            except Exception as error:  # never let one bad dictation kill the worker
+                log(f"Unexpected error: {error}")
+                self.show("error", f"Error: {error}")
+
+    def dictate(self, audio, released_at):
+        problem = check_audio(audio)
+        if problem:
+            log(f"Skipped: {problem}")
+            self.show("idle", f"Skipped: {problem}")
+            return
+
+        transcribe_start = time.perf_counter()
+        text, language = self.transcriber.transcribe(audio)
+        transcribed_at = time.perf_counter()
+        if not text:
+            log("Nothing recognized")
+            self.show("idle", "Nothing recognized; try again")
+            return
+        self.last_text = text
+        log(f"[{language}] {text}")
+
+        try:
+            # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
+            if not self.shortcut.released.wait(timeout=2):
+                raise RuntimeError("release Shift and Right Command, then try again")
+            paste_sent_at = paste_text(text)
+        except Exception as error:
+            log(f"Paste failed: {error}")
+            self.show("error", "Paste failed; use Copy last dictation", last=f"Last: {text[:40]}")
+            return
+
+        seconds = len(audio) / SAMPLE_RATE
+        total_ms = (paste_sent_at - released_at) * 1000
+        log(
+            f"  audio {seconds:.1f}s | latency {total_ms:.0f} ms "
+            f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms via {self.transcriber.last_path}, "
+            f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)"
+        )
+        self.show("idle", READY, last=f"Last: {total_ms:.0f} ms ({self.transcriber.last_path}, {language})")
 
 
 if __name__ == "__main__":
-    main()
+    Parole().run()

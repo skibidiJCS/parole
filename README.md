@@ -1,18 +1,17 @@
 # Parole
 
 Personal, offline speech-to-text dictation for macOS (Apple Silicon).
-Hold a hotkey, speak French or English, release, and the text is pasted into the focused app.
+Hold **Shift + Right Command**, speak French or English, release, and the text is pasted into the focused app.
 Everything runs locally; audio is never written to disk.
 
-Project folder: `/Users/jiacai/Documents/Parole`.
-Current version pastes into the focused app and also prints the transcription in Terminal.
-Automatic pasting across apps was confirmed by the user on October 31, 2026; the menu bar is an upcoming phase.
+Parole lives in the menu bar (mic icon). For now it is still started from Terminal; packaging as Parole.app is next.
 
 ## Setup
 
 Requires Python 3.10+ on an Apple Silicon Mac (tested with Python 3.14, macOS 27, M4).
 
 ```bash
+cd /Users/jiacai/Documents/Parole
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
@@ -27,80 +26,88 @@ After that, Parole runs fully offline.
 
 ## macOS permissions
 
-Permissions belong to the app that *launches* Python: Terminal, iTerm or VS Code.
-Grant them to whichever one you use, in **System Settings > Privacy & Security**:
-On this Mac, the Accessibility permission is labelled **Device Control and Data Access**.
+Permissions belong to the app that *launches* Python (Terminal for now).
+In **System Settings > Privacy & Security** (Accessibility is labelled **Device Control and Data Access** on this Mac):
 
-| Permission       | Why                                     |
-|------------------|-----------------------------------------|
-| Microphone       | record your voice                       |
-| Accessibility    | simulate Cmd+V to paste                 |
-| Input Monitoring | see the hotkey while another app is focused |
+| Permission       | Why                                          |
+|------------------|----------------------------------------------|
+| Microphone       | record your voice (macOS asks on first use)  |
+| Accessibility    | simulate Cmd+V to paste                      |
+| Input Monitoring | see the shortcut while another app is focused |
 
-Microphone is requested automatically the first time you record. The other two you add yourself with the **+** button.
-Quit and reopen the terminal afterwards: macOS only applies them on restart.
-
-## Check the setup
-
-```bash
-.venv/bin/python check_setup.py
-```
-
-It verifies the packages, the Accessibility permission, records 2 seconds from the mic (in memory) and transcribes them.
+Quit and reopen Terminal (Cmd+Q) after changing them.
 
 ## Run
 
 ```bash
 cd /Users/jiacai/Documents/Parole
-.venv/bin/python parole.py
+.venv/bin/python -u parole.py
 ```
 
-Hold **Shift + Right Command**, speak, then release either key to stop. Either Shift key works.
-Release both keys before pasting. Text is pasted into the focused app, and text plus latency are printed in Terminal.
-Ctrl+C to quit.
+A mic icon appears in the menu bar (an hourglass while the model loads, ~3 s).
+Hold **Shift + Right Command** (either Shift, either order), speak, release. Release both keys so the paste is a plain Cmd+V.
 
-First live test: after `Model ready`, focus a blank TextEdit document, hold Shift + Right Command, say a sentence, and release both keys.
-Allow Terminal microphone access if macOS asks; retry the recording after granting it.
-A quick tap should print `too short`; a quiet recording should print `nothing heard`.
-Live microphone and Right Command recording confirmed by the user on October 31, 2026.
-Two live dictations took 1151 ms and 1199 ms from key release to text ready.
-The user subsequently confirmed Shift + Right Command recording and automatic pasting across apps.
-Clipboard restoration and error handling passed automated checks.
-Phase 3 test: copy some text first, dictate in TextEdit, then press Cmd+V afterward.
-The dictation should appear automatically; Cmd+V afterward should paste your original copied text.
-If pasting reports a permission error, enable Terminal under Device Control and Data Access,
-quit Terminal completely with Cmd+Q, reopen it, and run Parole again.
+| Icon            | Meaning                                       |
+|-----------------|-----------------------------------------------|
+| hourglass       | loading the model                             |
+| mic             | ready                                         |
+| red filled mic  | recording                                     |
+| waveform        | transcribing                                  |
+| warning triangle| something needs attention (see the menu)     |
+
+The menu shows the status, the last latency and which path produced it (`fast` / `full` / `long`),
+**Copy last dictation** (in memory only, useful if a paste failed), the **Fast mode** toggle, and **Quit Parole**.
+Terminal keeps a log with each transcript and its timing; Ctrl+C there also quits.
+
+Your clipboard is restored 200 ms after each paste; anything you copy in the meantime is kept.
 
 ## Files
 
-| File             | Role                                                   |
-|------------------|--------------------------------------------------------|
-| `parole.py`      | hotkey listener + main loop                            |
-| `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration    |
-| `recorder.py`    | microphone capture into memory (16 kHz mono)           |
-| `transcriber.py` | Whisper: encode once, detect language, decode          |
-| `check_setup.py` | one-off setup and permissions check                    |
+| File             | Role                                                          |
+|------------------|---------------------------------------------------------------|
+| `parole.py`      | menu bar app: icon/menu, worker thread, dictation flow        |
+| `hotkey.py`      | Shift + Right Command hold-to-talk (pynput)                   |
+| `recorder.py`    | microphone capture into memory (16 kHz mono)                  |
+| `transcriber.py` | Whisper: fast short window, full 30 s window, long fallback   |
+| `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration          |
+| `check_setup.py` | one-off setup and permissions check                           |
 
-## Latency notes (M4 Air, large-v3-turbo)
+## Latency notes (M4 Air, large-v3-turbo, synthetic `say` voices)
 
-Whisper pads every clip to 30 s, so the encoder costs ~1 s whatever you say.
-`mlx_whisper.transcribe()` ran it twice with language auto-detect (~2.1 s);
-calling encoder → language detection → decoder ourselves brings it to ~1.1 s.
-Retested after relocation: synthetic English 1148 ms, French 1154 ms; both transcribed correctly.
-These measure transcription only, not live microphone capture or pasting.
+Whisper pads every clip to 30 s, so its encoder costs ~1 s whatever you say.
 
-Paste latency measures key release to sending Cmd+V; target apps may display it slightly later.
-Clipboard restoration happens after a 200 ms wait. Every item and data format is preserved;
-a newer copy made during that wait is left alone. Slow apps may need a longer wait.
+- `mlx_whisper.transcribe()` with auto-detect: ~2.1 s (runs the encoder twice).
+- Encoder once, then language detection + decoding: ~1.1 s ("full" path).
+- Fused attention (`mx.fast.scaled_dot_product_attention`) or `mx.compile`: only ~6%, not used.
+- **Fast mode** (default): encoder window = clip length + 1 s. Encoder 140-280 ms instead of ~1000 ms.
+  Without the long silence the decoder repeats itself, so we decode with timestamps and stop at the
+  first segment that's an exact repeat or starts past the window. If the result looks unreliable
+  (low confidence, or cut off by the token limit) it falls back to the full window.
+
+| Clip                  | Fast    | Full    | Same text?           |
+|-----------------------|---------|---------|----------------------|
+| EN 1.7 s              | 233 ms  | 1053 ms | missing one comma    |
+| EN 2.9 s              | 300 ms  | 1092 ms | yes                  |
+| FR 3.5 s              | 326 ms  | 1097 ms | yes                  |
+| FR+EN mixed 3.2 s     | 331 ms  | 1095 ms | yes                  |
+| FR 5.8 s              | 462 ms  | 1219 ms | yes                  |
+| EN 6.8 s              | 382 ms  | 1133 ms | yes                  |
+| EN 7.5 s              | 577 ms  | 1168 ms | yes                  |
+
+Faint noise is normally rejected (9/9 fixed samples), but fast mode once turned random noise into
+"Thank you." A real voice-activity detector (Silero VAD, phase 5) should fix that.
+Live numbers with a real voice are still to be measured.
+
+Latency in the log = key release → Cmd+V sent; the target app may draw the text slightly later.
 
 ## Roadmap
 
 1. ~~Setup~~
 2. ~~Hold hotkey, record, transcribe, print~~
 3. ~~Paste into the active app~~
-4. Menu bar app
+4. ~~Menu bar app~~ (with fast mode), confirmed working live on October 31, 2026
 5. Live streaming bubble
 6. Cleanup with a local LLM (Ollama)
 7. Command mode
 8. Settings
-9. Package as Parole.app
+9. Package as Parole.app, launch at login (planned next, to drop the Terminal requirement)
