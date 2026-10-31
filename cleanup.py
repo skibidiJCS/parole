@@ -1,7 +1,11 @@
-"""Remove stutters and phrases said twice in a row from a transcript.
+"""Tidy a transcript: filler words, stutters, repeats, and pauses.
 
-    "I- I think we should, we should leave."  ->  "I think we should leave."
-    "Je je pense que, je pense que c'est bon." ->  "Je pense que c'est bon."
+    "Um, I- I think we should, we should leave."  ->  "I think we should leave."
+    "Je je pense que, euh, je pense que c'est bon." ->  "Je pense que c'est bon."
+    pieces "I think we should." + "go tomorrow."    ->  "I think we should... go tomorrow."
+
+Fillers ("um", "euh"...) are dropped wherever they are; "like", "you know",
+"genre", "tu vois" only when they sit between commas, so "I like it" stays.
 
 The text is split into words (each keeping its punctuation and the space
 after it). Words are compared in a "normalised" form: lowercase, without
@@ -23,7 +27,18 @@ KEEP_DOUBLED = {"nous", "vous", "had", "that", "is", "very", "so", "no", "non", 
 # "w-what", "b-but", "th-the": a 1-2 letter fragment glued to the word it starts.
 GLUED_STUTTER = re.compile(r"\b(\w{1,2})-(\1)", re.IGNORECASE)
 REAL_PREFIXES = {"re", "co", "de", "ex", "un", "in", "bi"}  # "re-read", "co-op" are words
-SENTENCE_END = ".!?…"
+SENTENCE_END = ".!?"  # "..." / "…" is a pause, not the end of a sentence
+
+# Sounds that are never words: uh, uhm, um, umm, er, erm, hmm, mm, mmh, mhm, euh, heu, hum.
+FILLER = re.compile(r"^(?:u+h+|u+h*m+|e+r+m*|h+m+|m+h?m+|m+h+|e+u+h+|h+e+u+|h+u+m+)$")
+# Real words used as fillers when set off by commas: "it was, like, huge".
+COMMA_FILLERS = re.compile(r",\s+(?:like|you know|genre|tu vois),(\s+)", re.IGNORECASE)
+LEADING_LIKE = re.compile(r"(^|[.!?]\s+)like,\s+(\w)", re.IGNORECASE)
+
+
+def ends_sentence(token):
+    token = token.rstrip()
+    return token[-1:] in SENTENCE_END and not token.endswith(("...", "…"))
 
 
 def normalise(token):
@@ -69,8 +84,69 @@ def _repeat_length(tokens, words, i):
         if len(second) == n and first == second and all(first):
             if n == 1 and first[0] in KEEP_DOUBLED:
                 continue
-            # "C'est vrai. C'est vrai." is two sentences, probably on purpose.
-            if tokens[i + n - 1].rstrip()[-1:] in SENTENCE_END:
+            # "C'est vrai. C'est vrai." is two sentences, probably on purpose
+            # (but "we should... we should go" is a hesitation, not two sentences).
+            if ends_sentence(tokens[i + n - 1]):
                 continue
             return n
     return 0
+
+
+def remove_fillers(text):
+    """Drop "um", "euh"... and comma-wrapped "like", "you know", "genre", "tu vois"."""
+    text = COMMA_FILLERS.sub(r"\1", text)
+    text = LEADING_LIKE.sub(lambda m: m.group(1) + m.group(2).upper(), text)
+    kept, capitalize = [], False
+    for token in re.findall(r"\S+\s*", text):
+        if not FILLER.match(normalise(token)):
+            if capitalize:  # the filler started the sentence: its capital moves on
+                token, capitalize = token[:1].upper() + token[1:], False
+            kept.append(token)
+            continue
+        ending = token.rstrip()[-1:]
+        if kept:
+            previous = kept[-1].rstrip()
+            spaces = kept[-1][len(previous) :]
+            if ending in SENTENCE_END:  # "We go, um." -> "We go."
+                kept[-1] = previous.rstrip(",;:") + ending + spaces
+            elif ending == "," and previous.endswith(","):  # "It's, uh, fine" -> "It's fine"
+                kept[-1] = previous[:-1] + spaces
+        capitalize = capitalize or token[:1].isupper()
+    return "".join(kept).strip()
+
+
+# Words a sentence can't end on: if the text before a pause ends with one,
+# you were hesitating mid-sentence ("I think we should... go tomorrow").
+OPEN_ENDINGS = set("""
+a an the and or but because if which who whose to of for with from by at as than when where while into
+is are was were be been am will would should could must might have has had my your his our their its
+we i you he she they i'm we're you're they're very just every each
+le la les un une des du de et ou mais donc car que qui à au aux en dans sur pour par avec sans chez vers
+est sont était étaient suis es ai as avons avez ont va vais vas allons allez vont je tu il elle on nous
+vous ils elles mon ma mes ton ta tes son sa ses notre nos votre vos leur leurs ce cet cette ces c'est
+très ne se me te d' l' qu' j'
+""".split())  # not "so", "that", "this", "in", "pas", "plus"...: sentences often end on those
+# Words that carry a sentence on after a pause ("I went home... and then...").
+LINKING_STARTS = set("and but or so because then which that et mais ou donc parce puis alors qui que".split())
+KEEP_CAPITAL = {"I", "I'm", "I'll", "I've", "I'd"}
+
+
+def join_pieces(before, after, hesitation=True):
+    """Join text transcribed before and after a pause (Whisper did them separately).
+
+    A pause in the middle of a sentence doesn't end it: the sentence goes on,
+    with "..." if the pause was a long one (`hesitation`). A pause after a
+    complete sentence stays a normal sentence break.
+    """
+    if not before:
+        return after
+    last_word = normalise(before.split()[-1]) if before.split() else ""
+    first_word = normalise(after.split()[0]) if after.split() else ""
+    if last_word in OPEN_ENDINGS or first_word in LINKING_STARTS:
+        first, _, rest = after.partition(" ")
+        if first.strip(",.") not in KEEP_CAPITAL and not first[1:].isupper():  # keep "I", "IBM"
+            after = first[:1].lower() + first[1:] + (" " + rest if rest else "")
+        return before.rstrip(" .,;") + ("... " if hesitation else " ") + after
+    if before[-1:].isalnum():
+        before += "."  # Whisper sometimes leaves the last sentence open
+    return before + " " + after

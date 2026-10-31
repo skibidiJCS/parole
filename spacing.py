@@ -3,10 +3,10 @@
 Without this, two dictations in a row are glued together:
 "Hello there.How are you?"
 
-First choice: ask the focused text field, through the Accessibility API
-(the same permission Parole uses to paste), which character sits just
-before the cursor. Add a space after a letter or punctuation; not at the
-start of a field, after a space or newline, or after an opening bracket.
+First choice: ask the focused text field (via Accessibility, see ax.py)
+which character sits just before the cursor. Add a space after a letter or
+punctuation; not at the start of a field, after a space or newline, or after
+an opening bracket.
 
 Some apps (VS Code, some web pages) don't answer. Then we fall back to:
 "did the previous dictation go into this same app less than a minute ago?"
@@ -15,29 +15,12 @@ Some apps (VS Code, some web pages) don't answer. Then we fall back to:
 import time
 
 from AppKit import NSWorkspace
-from ApplicationServices import (
-    AXUIElementCopyAttributeValue,
-    AXUIElementCopyParameterizedAttributeValue,
-    AXUIElementCreateSystemWide,
-    AXUIElementSetMessagingTimeout,
-    AXValueCreate,
-    AXValueGetValue,
-    kAXErrorSuccess,
-    kAXFocusedUIElementAttribute,
-    kAXSelectedTextRangeAttribute,
-    kAXStringForRangeParameterizedAttribute,
-    kAXValueAttribute,
-    kAXValueCFRangeType,
-)
+from ApplicationServices import AXValueCreate, kAXValueCFRangeType
+
+import ax
 
 NO_SPACE_AFTER = "([{«“‘/-"  # characters that a following word sticks to
 RECENT_SECONDS = 60  # fallback: how long the previous dictation counts as "just before"
-AX_TIMEOUT = 0.1  # seconds; never let a slow app delay the paste for long
-
-
-def _attribute(element, name):
-    error, value = AXUIElementCopyAttributeValue(element, name, None)
-    return value if error == kAXErrorSuccess else None
 
 
 def char_before_cursor():
@@ -45,31 +28,20 @@ def char_before_cursor():
 
     Returns "" at the start of the field, or None if the app doesn't say.
     """
-    system = AXUIElementCreateSystemWide()
-    AXUIElementSetMessagingTimeout(system, AX_TIMEOUT)
-    field = _attribute(system, kAXFocusedUIElementAttribute)
-    return None if field is None else char_before_selection(field)
-
-
-def char_before_selection(field):
-    """The character before the cursor (or selection) in an Accessibility text element."""
-    selection = _attribute(field, kAXSelectedTextRangeAttribute)
-    if selection is None:
+    field = ax.focused_element()
+    text_range = ax.selected_range(field) if field is not None else None
+    if text_range is None:
         return None
-    ok, (start, _length) = AXValueGetValue(selection, kAXValueCFRangeType, None)
-    if not ok:
-        return None
+    start = text_range[0]
     if start == 0:
         return ""
     # Ask for just that one character, so huge documents aren't copied over.
     one_char = AXValueCreate(kAXValueCFRangeType, (start - 1, 1))
-    error, text = AXUIElementCopyParameterizedAttributeValue(
-        field, kAXStringForRangeParameterizedAttribute, one_char, None
-    )
-    if error == kAXErrorSuccess and text:
+    text = ax.parameterized(field, "AXStringForRange", one_char)
+    if text:
         return str(text)
     # Some fields only expose their whole text.
-    value = _attribute(field, kAXValueAttribute)
+    value = ax.attribute(field, "AXValue")
     if isinstance(value, str) and start <= len(value):
         return value[start - 1]
     return None

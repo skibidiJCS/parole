@@ -9,11 +9,14 @@ How Whisper works, in two halves:
 Whisper was trained on 30 s windows, so normally every clip is padded with
 silence to 30 s and the encoder costs ~1 s on an M4 whatever you say.
 
-Fast mode shrinks the window to the clip length + 1 s, so the encoder only
-works on real audio (~150-300 ms). The catch: without the long silence, the
+Fast mode shrinks the window to the clip length + 1 s (at least 6 s: below
+that, language detection mistakes short French for English), so the encoder
+only works on real audio (~150-300 ms). The catch: without the long silence, the
 decoder doesn't realise the speech has ended and repeats it. We ask for
 timestamps, split the output into segments, and stop at the first segment
-that is an exact repeat or a timestamp past the end of the window.
+that is an exact repeat or a timestamp past the end of the window. Loops
+inside one segment ("on se voit demain, on se voit demain, ...") are cut at
+the second of three identical copies.
 Whenever fast mode is unsure (nothing found, low confidence, or the text was
 cut off by the token limit) we retry with the full 30 s window.
 
@@ -25,6 +28,7 @@ recordings into pieces.
 
 import math
 import os
+import re
 from contextlib import contextmanager
 
 # The model is already in ~/.cache/huggingface, so never contact the internet.
@@ -41,6 +45,8 @@ from recorder import SAMPLE_RATE  # noqa: E402
 
 MODEL = "mlx-community/whisper-large-v3-turbo"
 FULL_WINDOW = 30  # seconds, what Whisper was trained on
+MIN_WINDOW = 6  # seconds; shorter windows misdetect short French clips as English
+LANGUAGES = ("en", "fr")  # the languages you speak; detection picks between these
 MEL_FRAMES_PER_SECOND = 100  # the encoder halves this: 50 features per second
 SECONDS_PER_TIMESTAMP = 0.02  # each timestamp token is 20 ms
 # Average token log-probability below which fast mode is "unsure". Measured:
@@ -76,7 +82,7 @@ class Transcriber:
         # over time), padded to 30 s. Fast mode only uses the start of it.
         mel = log_mel_spectrogram(pad_or_trim(mx.array(audio)), n_mels=self.model.dims.n_mels)
         if self.fast:
-            window = min(FULL_WINDOW, math.ceil(len(audio) / SAMPLE_RATE) + 1)
+            window = min(FULL_WINDOW, max(MIN_WINDOW, math.ceil(len(audio) / SAMPLE_RATE) + 1))
             text, language = self._transcribe_short(mel, window, prompt)
             if text:
                 self.last_path = "fast"
@@ -88,9 +94,9 @@ class Transcriber:
         """Run the encoder once, then detect the language from its output."""
         frames = window * MEL_FRAMES_PER_SECOND
         features = self.model.encoder(mel[None, :frames].astype(mx.float16))
-        # Ask the decoder which language token is most likely (fr, en, ...).
+        # Ask the decoder which of your languages is most likely.
         _, language_probs = self.model.detect_language(features)
-        return features, max(language_probs[0], key=language_probs[0].get)
+        return features, max(LANGUAGES, key=language_probs[0].get)
 
     def _transcribe_full(self, mel, prompt):
         features, language = self._encode(mel, FULL_WINDOW)
@@ -114,12 +120,13 @@ class Transcriber:
             )
             result = decode(self.model, features, options)[0]
 
-        if result.avg_logprob < FAST_MIN_LOGPROB:
+        if not result.avg_logprob >= FAST_MIN_LOGPROB:  # also catches "not a number"
             return "", language  # probably noise; let the full window decide
         segments, stopped = self._segments_within(result.tokens, window)
-        if not stopped and len(result.tokens) >= sample_len:
+        text, looped = first_copy(" ".join(segments))
+        if not (stopped or looped) and len(result.tokens) >= sample_len:
             return "", language  # the token cap cut the speech off
-        return clean(" ".join(segments)), language
+        return clean(text), language
 
     @contextmanager
     def _encoder_window(self, n_features):
@@ -166,6 +173,22 @@ class Transcriber:
         if words:
             segments.append(self.tokenizer.decode(words).strip())
         return segments, False
+
+
+def first_copy(text):
+    """Cut a decoder loop: "a b, a b, a b, ..." -> "a b". Returns (text, looped).
+
+    Needs three identical copies in a row, so a phrase you really said twice
+    is left alone (cleanup.py removes that one more carefully).
+    """
+    words = text.split()
+    plain = [re.sub(r"[^\w']", "", word.lower()) for word in words]
+    for end in range(3, len(words) + 1):
+        for size in range(1, end // 3 + 1):
+            a, b, c = (plain[end - k * size : end - (k - 1) * size] for k in (3, 2, 1))
+            if a == b == c:
+                return " ".join(words[: end - 2 * size]).rstrip(",;:"), True
+    return text, False
 
 
 def clean(text):

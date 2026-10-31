@@ -7,14 +7,15 @@ Offline dictation for macOS (Apple Silicon). Speak French or English; the text i
 - **Hold** Shift + Right Command, speak, release: the text is pasted.
 - **Tap** Shift + Right Command to talk hands-free; tap again to stop.
 
-While you speak, a bubble at the bottom of the screen shows your words live. The text is pasted once, when you stop.
+While you speak, a bubble inside the app you're typing in (under the text cursor) shows your words live.
+The text is pasted once, when you stop. A long pause mid-sentence is written "...", and the sentence keeps going.
 
 The menu bar mic shows the state (red while recording). Its menu has:
 
 - **Copy last dictation**: if a paste didn't land.
 - **Edit vocabulary…**: names and jargon, one per line. Add `Jack-eye -> Jiacai` to fix a word that keeps coming out wrong.
 - **Fast mode**: on by default. Turn it off for slightly better accuracy (~1 s per dictation instead of ~0.4 s).
-- **Remove repeats**: drops stutters and phrases said twice in a row.
+- **Remove fillers & repeats**: drops "um", "euh", "like" (between commas), stutters and phrases said twice.
 - **Live preview**: the bubble. Turn it off to save battery; dictation still works the same.
 
 ## Install
@@ -43,7 +44,8 @@ To see a live log, run `.venv/bin/python -u parole.py` instead of the app.
 | `bubble.py` | the live-preview bubble |
 | `voice.py` | skips silence and splits long recordings (Silero VAD) |
 | `transcriber.py` | Whisper large-v3-turbo on the GPU (MLX), with fast mode |
-| `cleanup.py` | removes stutters and repeats |
+| `cleanup.py` | removes fillers, stutters and repeats; joins sentences across pauses |
+| `ax.py` | asks other apps where their window and text cursor are (Accessibility) |
 | `vocabulary.py` | your words and replacements |
 | `spacing.py` | spaces between consecutive dictations |
 | `paster.py` | pastes and restores your clipboard |

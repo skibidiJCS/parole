@@ -37,21 +37,21 @@ from AppKit import (
 from PyObjCTools import AppHelper
 
 from bubble import Bubble
-from cleanup import remove_repeats
+from cleanup import join_pieces, remove_fillers, remove_repeats
 from hotkey import Shortcut
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
 from spacing import Spacer
 from transcriber import Transcriber
 from vocabulary import Vocabulary
-from voice import PADDING, VoiceDetector
+from voice import MAX_GAP, PADDING, VoiceDetector
 
 MIN_SECONDS = 0.3  # shorter recordings are treated as accidental
 TAP_SECONDS = 0.3  # a press shorter than this starts hands-free recording
 MAX_HANDS_FREE = 10 * 60  # seconds; hands-free recording stops by itself after this
 LIVE_INTERVAL = 0.5  # seconds between live-preview refreshes while recording
-PAUSE_SECONDS = 0.6  # a pause this long ends a sentence: it's transcribed for good
 MAX_PENDING = 20  # seconds of speech without a pause before we keep it anyway
+HESITATION = 1.0  # seconds; a pause this long mid-sentence is written "..."
 READY = "Ready: hold ⇧ + right ⌘ and speak"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
@@ -86,11 +86,12 @@ class LivePreview:
 
     def __init__(self):
         self.done_samples = 0  # audio before this point is transcribed for good...
-        self.done = []  # ...into these (text, language) pieces
-        self.partial = ""  # the sentence in progress, re-transcribed each refresh
+        self.done = ""  # ...into this text
+        self.language = None
+        self.preview = ""  # done + the piece in progress, re-transcribed each refresh
 
     def text(self):
-        return " ".join([text for text, _ in self.done] + [self.partial]).strip()
+        return self.preview or self.done
 
 
 class Parole(rumps.App):
@@ -102,7 +103,7 @@ class Parole(rumps.App):
         self.last_item = rumps.MenuItem("No dictation yet")
         self.fast_item = rumps.MenuItem("Fast mode", callback=self.toggle_fast)
         self.fast_item.state = True
-        self.repeats_item = rumps.MenuItem("Remove repeats", callback=self.toggle_repeats)
+        self.repeats_item = rumps.MenuItem("Remove fillers & repeats", callback=self.toggle_repeats)
         self.repeats_item.state = True
         self.live_item = rumps.MenuItem("Live preview", callback=self.toggle_live)
         self.live_item.state = True
@@ -175,7 +176,7 @@ class Parole(rumps.App):
 
     def toggle_repeats(self, item):
         item.state = not item.state
-        log(f"Remove repeats {'on' if item.state else 'off'}")
+        log(f"Remove fillers & repeats {'on' if item.state else 'off'}")
 
     def toggle_live(self, item):
         item.state = not item.state
@@ -326,11 +327,28 @@ class Parole(rumps.App):
                 self.live = None
                 AppHelper.callAfter(self.bubble.hide)
 
-    def transcribe_speech(self, audio):
-        """Transcribe the speech in `audio` (any length) as a list of (text, language)."""
-        prompt = self.vocabulary.prompt()
-        pieces = (self.transcriber.transcribe(chunk, prompt) for chunk in self.voice.speech_chunks(audio))
-        return [(text, language) for text, language in pieces if text]
+    def transcribe_speech(self, audio, before=""):
+        """Transcribe the speech in `audio` (any length), continuing the text `before`.
+
+        Returns (all the text, language of the first new piece). The audio is
+        cut at pauses; join_pieces glues the pieces back, keeping a sentence
+        going through a pause and writing a long one as "...".
+        """
+        prompt, text, language = self.vocabulary.prompt(), before, None
+        previous_end = 0  # `audio` starts right after the text `before`
+        for start, end in self.voice.speech_pieces(audio):
+            piece, piece_language = self.transcriber.transcribe(audio[start:end], prompt)
+            if piece:
+                pause = (start - previous_end) / SAMPLE_RATE + 2 * PADDING  # both pieces carry padding
+                text = join_pieces(text, piece, hesitation=pause >= HESITATION)
+                language = language or piece_language
+            previous_end = end
+        return text, language
+
+    def tidy(self, text):
+        if self.repeats_item.state:
+            text = remove_repeats(remove_fillers(text))  # "Um, I- I think" -> "I think"
+        return self.vocabulary.fix(text)
 
     def refresh_live(self):
         live = self.live
@@ -343,16 +361,17 @@ class Parole(rumps.App):
         if not spans:
             return
         speech_end = spans[-1]["end"]
-        if len(rest) - speech_end > PAUSE_SECONDS * SAMPLE_RATE or speech_end > MAX_PENDING * SAMPLE_RATE:
-            # A finished sentence: transcribe it for good and never look at it again,
-            # so the end of a long dictation only has the last sentence left to do.
+        if len(rest) - speech_end > MAX_GAP * SAMPLE_RATE or speech_end > MAX_PENDING * SAMPLE_RATE:
+            # A pause: transcribe what came before it for good and never look at
+            # it again, so the end of a long dictation has little left to do.
             end = min(len(rest), speech_end + int(PADDING * SAMPLE_RATE))
-            live.done += self.transcribe_speech(rest[:end])
+            live.done, language = self.transcribe_speech(rest[:end], live.done)
+            live.language = live.language or language
             live.done_samples += end
-            live.partial = ""
+            live.preview = ""
         else:
-            live.partial = " ".join(text for text, _ in self.transcribe_speech(rest))
-        AppHelper.callAfter(self.bubble.show, live.text() or "Listening…")
+            live.preview, _ = self.transcribe_speech(rest, live.done)
+        AppHelper.callAfter(self.bubble.show, self.tidy(live.text()) or "Listening…")
 
     def dictate(self, audio, released_at):
         try:
@@ -371,17 +390,16 @@ class Parole(rumps.App):
         # Sentences the live preview already finished are reused; only the rest
         # (usually the last sentence) is transcribed now.
         transcribe_start = time.perf_counter()
-        done_samples, done = (live.done_samples, live.done) if live else (0, [])
-        results = done + self.transcribe_speech(audio[done_samples:])
-        if not results:
+        done_samples, done, done_language = (live.done_samples, live.done, live.language) if live else (0, "", None)
+        text, language = self.transcribe_speech(audio[done_samples:], done)
+        language = done_language or language
+        if not text:
             log("Skipped: no speech detected")
             self.show("idle", "Skipped: no speech detected")
             return
-        text = " ".join(text for text, _ in results)
-        language = results[0][1]
-        if self.repeats_item.state:
-            text = remove_repeats(text)  # "I- I think we, we should" -> "I think we should"
-        text = self.vocabulary.fix(text)
+        text = self.tidy(text)
+        if text[-1:].isalnum():
+            text += "."  # Whisper sometimes leaves the last sentence open
         transcribed_at = time.perf_counter()
         if not text:
             log("Nothing recognized")
@@ -403,7 +421,7 @@ class Parole(rumps.App):
 
         total_ms = (paste_sent_at - released_at) * 1000
         log(
-            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, {len(done)} sentence(s) done live, "
+            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, {done_samples / SAMPLE_RATE:.1f}s done live, "
             f"last {(len(audio) - done_samples) / SAMPLE_RATE:.1f}s at release | latency {total_ms:.0f} ms "
             f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms via {self.transcriber.last_path}, "
             f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)"
