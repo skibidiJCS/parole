@@ -7,12 +7,15 @@ Offline dictation for macOS (Apple Silicon). Speak French or English; the text i
 - **Hold** Shift + Right Command, speak, release: the text is pasted.
 - **Tap** Shift + Right Command to talk hands-free; tap again to stop.
 
+While you speak, a bubble at the bottom of the screen shows your words live. The text is pasted once, when you stop.
+
 The menu bar mic shows the state (red while recording). Its menu has:
 
 - **Copy last dictation**: if a paste didn't land.
 - **Edit vocabulary…**: names and jargon, one per line. Add `Jack-eye -> Jiacai` to fix a word that keeps coming out wrong.
 - **Fast mode**: on by default. Turn it off for slightly better accuracy (~1 s per dictation instead of ~0.4 s).
 - **Remove repeats**: drops stutters and phrases said twice in a row.
+- **Live preview**: the bubble. Turn it off to save battery; dictation still works the same.
 
 ## Install
 
@@ -37,6 +40,7 @@ To see a live log, run `.venv/bin/python -u parole.py` instead of the app.
 | `parole.py` | menu bar app and dictation flow |
 | `hotkey.py` | Shift + Right Command (hold or tap) |
 | `recorder.py` | microphone, in memory only |
+| `bubble.py` | the live-preview bubble |
 | `voice.py` | skips silence and splits long recordings (Silero VAD) |
 | `transcriber.py` | Whisper large-v3-turbo on the GPU (MLX), with fast mode |
 | `cleanup.py` | removes stutters and repeats |

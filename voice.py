@@ -26,9 +26,13 @@ class VoiceDetector:
         torch.set_num_threads(1)  # one core is plenty for this model and saves battery
         self.model = load_silero_vad()
 
+    def spans(self, audio):
+        """Where the speech is: a list of {"start": sample, "end": sample}."""
+        return get_speech_timestamps(torch.from_numpy(audio), self.model, sampling_rate=SAMPLE_RATE)
+
     def speech_chunks(self, audio):
         """Return the speech as a list of audio pieces (empty if nobody spoke)."""
-        spans = get_speech_timestamps(torch.from_numpy(audio), self.model, sampling_rate=SAMPLE_RATE)
+        spans = self.spans(audio)
         padding, max_gap, max_len = (int(s * SAMPLE_RATE) for s in (PADDING, MAX_GAP, MAX_CHUNK))
 
         # Merge speech spans into pieces, starting a new piece after a long

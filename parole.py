@@ -12,8 +12,9 @@ Three threads are involved:
     It must stay fast, or macOS considers the key handler stuck.
   - A worker thread loads the Whisper model, then waits for recordings and
     transcribes + pastes them. MLX wants the model used from the thread that
-    loaded it, so all Whisper work happens here.
-A queue hands recordings from the listener thread to the worker.
+    loaded it, so all Whisper work happens here, including the live preview
+    it refreshes every LIVE_INTERVAL seconds while you speak.
+A queue hands "a recording started" and finished recordings to the worker.
 """
 
 import os
@@ -35,6 +36,7 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
+from bubble import Bubble
 from cleanup import remove_repeats
 from hotkey import Shortcut
 from paster import paste_text
@@ -42,11 +44,14 @@ from recorder import SAMPLE_RATE, Recorder
 from spacing import Spacer
 from transcriber import Transcriber
 from vocabulary import Vocabulary
-from voice import VoiceDetector
+from voice import PADDING, VoiceDetector
 
 MIN_SECONDS = 0.3  # shorter recordings are treated as accidental
 TAP_SECONDS = 0.3  # a press shorter than this starts hands-free recording
 MAX_HANDS_FREE = 10 * 60  # seconds; hands-free recording stops by itself after this
+LIVE_INTERVAL = 0.5  # seconds between live-preview refreshes while recording
+PAUSE_SECONDS = 0.6  # a pause this long ends a sentence: it's transcribed for good
+MAX_PENDING = 20  # seconds of speech without a pause before we keep it anyway
 READY = "Ready: hold ⇧ + right ⌘ and speak"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
@@ -76,6 +81,18 @@ def check_audio(audio):
     return None
 
 
+class LivePreview:
+    """What the live preview knows about the recording in progress (worker thread only)."""
+
+    def __init__(self):
+        self.done_samples = 0  # audio before this point is transcribed for good...
+        self.done = []  # ...into these (text, language) pieces
+        self.partial = ""  # the sentence in progress, re-transcribed each refresh
+
+    def text(self):
+        return " ".join([text for text, _ in self.done] + [self.partial]).strip()
+
+
 class Parole(rumps.App):
     def __init__(self, log_transcripts=True):
         super().__init__("Parole", quit_button=None)
@@ -87,6 +104,8 @@ class Parole(rumps.App):
         self.fast_item.state = True
         self.repeats_item = rumps.MenuItem("Remove repeats", callback=self.toggle_repeats)
         self.repeats_item.state = True
+        self.live_item = rumps.MenuItem("Live preview", callback=self.toggle_live)
+        self.live_item.state = True
         self.menu = [
             self.status_item,
             self.last_item,
@@ -95,6 +114,7 @@ class Parole(rumps.App):
             rumps.MenuItem("Edit vocabulary…", callback=self.edit_vocabulary),
             self.fast_item,
             self.repeats_item,
+            self.live_item,
             None,
             rumps.MenuItem("Quit Parole", callback=self.quit),
         ]
@@ -115,6 +135,8 @@ class Parole(rumps.App):
         self.vocabulary = Vocabulary()
         self.vocabulary.ensure_file()
         self.spacer = Spacer()
+        self.bubble = Bubble()
+        self.live = None  # LivePreview while recording with the preview on
         self.shortcut = Shortcut(
             on_start=self.start_recording, on_stop=self.stop_recording, on_cancel=self.cancel_recording
         )
@@ -154,6 +176,10 @@ class Parole(rumps.App):
     def toggle_repeats(self, item):
         item.state = not item.state
         log(f"Remove repeats {'on' if item.state else 'off'}")
+
+    def toggle_live(self, item):
+        item.state = not item.state
+        log(f"Live preview {'on' if item.state else 'off'}")
 
     def copy_last(self, _):
         if self.last_text:
@@ -196,6 +222,7 @@ class Parole(rumps.App):
                 return
             self.is_recording = True
             self.pressed_at = time.perf_counter()
+            self.recordings.put("start")  # wakes the worker for the live preview
         self.show("recording", "Recording…")
 
     def stop_recording(self):  # shortcut released
@@ -278,29 +305,79 @@ class Parole(rumps.App):
             AppHelper.callAfter(AXIsProcessTrustedWithOptions, {kAXTrustedCheckOptionPrompt: True})
 
         while True:
-            audio, released_at = self.recordings.get()  # waits, using no CPU
             try:
-                self.dictate(audio, released_at)
+                # Idle: wait for a recording, using no CPU. Recording with the
+                # live preview on: wake up every LIVE_INTERVAL to refresh it.
+                item = self.recordings.get(timeout=LIVE_INTERVAL if self.live else None)
+            except queue.Empty:
+                item = "refresh"
+            try:
+                if item == "start":
+                    if self.live_item.state:
+                        self.live = LivePreview()
+                        AppHelper.callAfter(self.bubble.show, "Listening…")
+                elif item == "refresh":
+                    self.refresh_live()
+                else:
+                    self.dictate(*item)
             except Exception as error:  # never let one bad dictation kill the worker
                 log(f"Unexpected error: {error}")
                 self.show("error", f"Error: {error}")
+                self.live = None
+                AppHelper.callAfter(self.bubble.hide)
+
+    def transcribe_speech(self, audio):
+        """Transcribe the speech in `audio` (any length) as a list of (text, language)."""
+        prompt = self.vocabulary.prompt()
+        pieces = (self.transcriber.transcribe(chunk, prompt) for chunk in self.voice.speech_chunks(audio))
+        return [(text, language) for text, language in pieces if text]
+
+    def refresh_live(self):
+        live = self.live
+        if not self.is_recording:  # cancelled, or the mic failed
+            self.live = None
+            AppHelper.callAfter(self.bubble.hide)
+            return
+        rest = self.recorder.snapshot()[live.done_samples :]
+        spans = self.voice.spans(rest) if len(rest) > SAMPLE_RATE // 2 else []
+        if not spans:
+            return
+        speech_end = spans[-1]["end"]
+        if len(rest) - speech_end > PAUSE_SECONDS * SAMPLE_RATE or speech_end > MAX_PENDING * SAMPLE_RATE:
+            # A finished sentence: transcribe it for good and never look at it again,
+            # so the end of a long dictation only has the last sentence left to do.
+            end = min(len(rest), speech_end + int(PADDING * SAMPLE_RATE))
+            live.done += self.transcribe_speech(rest[:end])
+            live.done_samples += end
+            live.partial = ""
+        else:
+            live.partial = " ".join(text for text, _ in self.transcribe_speech(rest))
+        AppHelper.callAfter(self.bubble.show, live.text() or "Listening…")
 
     def dictate(self, audio, released_at):
+        try:
+            self._dictate(audio, released_at)
+        finally:
+            AppHelper.callAfter(self.bubble.hide)
+
+    def _dictate(self, audio, released_at):
+        live, self.live = self.live, None
         problem = check_audio(audio)
         if problem:
             log(f"Skipped: {problem}")
             self.show("idle", f"Skipped: {problem}")
             return
 
+        # Sentences the live preview already finished are reused; only the rest
+        # (usually the last sentence) is transcribed now.
         transcribe_start = time.perf_counter()
-        chunks = self.voice.speech_chunks(audio)  # speech only, in pieces of up to 28 s
-        if not chunks:
+        done_samples, done = (live.done_samples, live.done) if live else (0, [])
+        results = done + self.transcribe_speech(audio[done_samples:])
+        if not results:
             log("Skipped: no speech detected")
             self.show("idle", "Skipped: no speech detected")
             return
-        prompt = self.vocabulary.prompt()
-        results = [self.transcriber.transcribe(chunk, prompt) for chunk in chunks]
-        text = " ".join(text for text, _ in results if text)
+        text = " ".join(text for text, _ in results)
         language = results[0][1]
         if self.repeats_item.state:
             text = remove_repeats(text)  # "I- I think we, we should" -> "I think we should"
@@ -326,8 +403,8 @@ class Parole(rumps.App):
 
         total_ms = (paste_sent_at - released_at) * 1000
         log(
-            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, speech {sum(map(len, chunks)) / SAMPLE_RATE:.1f}s "
-            f"in {len(chunks)} piece(s) | latency {total_ms:.0f} ms "
+            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, {len(done)} sentence(s) done live, "
+            f"last {(len(audio) - done_samples) / SAMPLE_RATE:.1f}s at release | latency {total_ms:.0f} ms "
             f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms via {self.transcriber.last_path}, "
             f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)"
         )

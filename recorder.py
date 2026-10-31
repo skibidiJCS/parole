@@ -36,6 +36,11 @@ class Recorder:
         # `block` is reused by sounddevice, so keep a copy.
         self._chunks.append(block.copy())
 
+    def snapshot(self):
+        """The audio recorded so far, without stopping (for the live preview)."""
+        chunks = list(self._chunks)  # copy: the audio thread keeps appending
+        return np.concatenate(chunks).flatten() if chunks else np.zeros(0, dtype=np.float32)
+
     def stop(self):
         """Stop recording and return the audio as a 1-D float32 array."""
         if self._stream is None:
