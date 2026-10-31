@@ -51,9 +51,9 @@ def paste_text(text):
         return None
     if not AXIsProcessTrusted():
         raise PermissionError(
-            "Enable Terminal in System Settings > Privacy & Security > "
-            "Device Control and Data Access (Accessibility), then quit Terminal "
-            "with Cmd+Q and reopen it."
+            "Allow Parole (or Terminal, if you run it from there) in System Settings > "
+            "Privacy & Security > Device Control and Data Access (Accessibility), "
+            "then quit and reopen it."
         )
 
     pasteboard = NSPasteboard.generalPasteboard()

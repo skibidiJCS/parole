@@ -1,7 +1,8 @@
-"""Parole, phase 4: a menu bar app. Hold Shift + Right Command, speak, release,
+"""Parole: a menu bar app. Hold Shift + Right Command, speak, release,
 and the text is pasted into the focused app.
 
-    .venv/bin/python parole.py
+    open /Applications/Parole.app          # normal use (see setup.py)
+    .venv/bin/python -u parole.py          # from Terminal, with a live log
 
 Three threads are involved:
   - The main thread belongs to AppKit (via rumps): it draws the menu bar icon
@@ -15,12 +16,15 @@ Three threads are involved:
 A queue hands recordings from the listener thread to the worker.
 """
 
+import os
 import queue
+import sys
 import threading
 import time
 
 import numpy as np
 import rumps
+from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
@@ -39,6 +43,7 @@ from transcriber import Transcriber
 MIN_SECONDS = 0.3  # shorter presses are treated as accidental
 SILENCE_RMS = 0.002  # below this average loudness, nobody spoke
 READY = "Ready: hold ⇧ + right ⌘ and speak"
+LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
 # SF Symbols (the icon set macOS itself uses) for each state.
 ICONS = {
@@ -68,8 +73,9 @@ def check_audio(audio):
 
 
 class Parole(rumps.App):
-    def __init__(self):
+    def __init__(self, log_transcripts=True):
         super().__init__("Parole", quit_button=None)
+        self.log_transcripts = log_transcripts
         # Items without a callback are greyed out: they're status lines.
         self.status_item = rumps.MenuItem("Loading the speech model…")
         self.last_item = rumps.MenuItem("No dictation yet")
@@ -184,7 +190,10 @@ class Parole(rumps.App):
             self.show("idle", READY)
         else:
             log("Accessibility is not granted: the shortcut and pasting won't work.")
-            self.show("error", "Needs Accessibility + Input Monitoring permission")
+            self.show("error", "Allow Accessibility + Input Monitoring, then reopen Parole")
+            # Ask macOS to show its "would like to control this computer" prompt,
+            # which also adds Parole to the list in System Settings.
+            AppHelper.callAfter(AXIsProcessTrustedWithOptions, {kAXTrustedCheckOptionPrompt: True})
 
         while True:
             audio, released_at = self.recordings.get()  # waits, using no CPU
@@ -209,7 +218,7 @@ class Parole(rumps.App):
             self.show("idle", "Nothing recognized; try again")
             return
         self.last_text = text
-        log(f"[{language}] {text}")
+        log(f"[{language}] {text if self.log_transcripts else f'{len(text)} characters'}")
 
         try:
             # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
@@ -231,5 +240,14 @@ class Parole(rumps.App):
         self.show("idle", READY, last=f"Last: {total_ms:.0f} ms ({self.transcriber.last_path}, {language})")
 
 
+def main():
+    in_terminal = sys.stdout is not None and sys.stdout.isatty()
+    if not in_terminal:
+        # Started as Parole.app: there's no Terminal to print to, so append to
+        # a log file instead. Transcripts stay out of it (timings and errors only).
+        sys.stdout = sys.stderr = open(LOG_PATH, "a", buffering=1)
+    Parole(log_transcripts=in_terminal).run()
+
+
 if __name__ == "__main__":
-    Parole().run()
+    main()
