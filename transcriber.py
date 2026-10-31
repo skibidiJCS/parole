@@ -17,9 +17,10 @@ that is an exact repeat or a timestamp past the end of the window.
 Whenever fast mode is unsure (nothing found, low confidence, or the text was
 cut off by the token limit) we retry with the full 30 s window.
 
-mlx_whisper.transcribe() would also run the encoder twice when the language is
-unknown (once to detect it, once to transcribe), so for clips up to 30 s we
-call the two halves ourselves and the encoder runs only once.
+We call the encoder and decoder ourselves rather than mlx_whisper.transcribe(),
+which would run the encoder twice (once to detect the language) and keep its
+own second copy of the model. Clips must be at most 30 s; voice.py cuts longer
+recordings into pieces.
 """
 
 import math
@@ -30,9 +31,8 @@ from contextlib import contextmanager
 os.environ["HF_HUB_OFFLINE"] = "1"
 
 import mlx.core as mx  # noqa: E402  (must come after setting HF_HUB_OFFLINE)
-import mlx_whisper  # noqa: E402
 import numpy as np  # noqa: E402
-from mlx_whisper.audio import N_SAMPLES, log_mel_spectrogram, pad_or_trim  # noqa: E402
+from mlx_whisper.audio import log_mel_spectrogram, pad_or_trim  # noqa: E402
 from mlx_whisper.decoding import DecodingOptions, decode  # noqa: E402
 from mlx_whisper.load_models import load_model  # noqa: E402
 from mlx_whisper.tokenizer import get_tokenizer  # noqa: E402
@@ -54,7 +54,7 @@ class Transcriber:
         self.model = None
         self.tokenizer = None
         self.fast = True
-        self.last_path = None  # "fast", "full" or "long": which path produced the text
+        self.last_path = None  # "fast" or "full": which path produced the text
 
     def warm_up(self):
         # Load the weights into memory once (~3 s) and run them on a second of
@@ -65,15 +65,12 @@ class Transcriber:
         self.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
 
     def transcribe(self, audio, prompt=""):
-        """Return (text, language) for a 16 kHz mono float32 array.
+        """Return (text, language) for up to 30 s of 16 kHz mono float32 audio.
 
         `prompt` is text Whisper reads as if it came just before the audio.
         Listing names and jargon there makes it reuse those spellings.
         """
         prompt = prompt or None
-        if len(audio) > N_SAMPLES:
-            self.last_path = "long"
-            return self._transcribe_long(audio, prompt)
 
         # Audio -> mel spectrogram (a picture of which frequencies are loud
         # over time), padded to 30 s. Fast mode only uses the start of it.
@@ -169,13 +166,6 @@ class Transcriber:
         if words:
             segments.append(self.tokenizer.decode(words).strip())
         return segments, False
-
-    def _transcribe_long(self, audio, prompt):
-        # Over 30 s, let mlx_whisper slide its 30 s window over the audio.
-        result = mlx_whisper.transcribe(
-            audio, path_or_hf_repo=self.model_name, condition_on_previous_text=False, initial_prompt=prompt
-        )
-        return clean(result["text"]), result.get("language")
 
 
 def clean(text):

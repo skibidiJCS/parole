@@ -262,7 +262,7 @@ class Parole(rumps.App):
             self.voice = VoiceDetector()
         except Exception as error:
             log(f"Could not load the offline model: {error}")
-            self.show("error", "Speech model failed to load; run check_setup.py")
+            self.show("error", "Speech model failed to load; see ~/Library/Logs/Parole.log")
             return
         log(f"Model ready in {time.perf_counter() - start:.1f}s")
 
@@ -293,12 +293,15 @@ class Parole(rumps.App):
             return
 
         transcribe_start = time.perf_counter()
-        speech = self.voice.trim(audio)
-        if speech is None:
+        chunks = self.voice.speech_chunks(audio)  # speech only, in pieces of up to 28 s
+        if not chunks:
             log("Skipped: no speech detected")
             self.show("idle", "Skipped: no speech detected")
             return
-        text, language = self.transcriber.transcribe(speech, self.vocabulary.prompt())
+        prompt = self.vocabulary.prompt()
+        results = [self.transcriber.transcribe(chunk, prompt) for chunk in chunks]
+        text = " ".join(text for text, _ in results if text)
+        language = results[0][1]
         if self.repeats_item.state:
             text = remove_repeats(text)  # "I- I think we, we should" -> "I think we should"
         text = self.vocabulary.fix(text)
@@ -323,7 +326,8 @@ class Parole(rumps.App):
 
         total_ms = (paste_sent_at - released_at) * 1000
         log(
-            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, speech {len(speech) / SAMPLE_RATE:.1f}s | latency {total_ms:.0f} ms "
+            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, speech {sum(map(len, chunks)) / SAMPLE_RATE:.1f}s "
+            f"in {len(chunks)} piece(s) | latency {total_ms:.0f} ms "
             f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms via {self.transcriber.last_path}, "
             f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)"
         )
