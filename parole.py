@@ -18,11 +18,11 @@ A queue hands recordings from the listener thread to the worker.
 
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
 
-import numpy as np
 import rumps
 from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
 from AppKit import (
@@ -39,9 +39,10 @@ from hotkey import Shortcut
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
 from transcriber import Transcriber
+from vocabulary import Vocabulary
+from voice import VoiceDetector
 
 MIN_SECONDS = 0.3  # shorter presses are treated as accidental
-SILENCE_RMS = 0.002  # below this average loudness, nobody spoke
 READY = "Ready: hold ⇧ + right ⌘ and speak"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
@@ -67,8 +68,6 @@ def check_audio(audio):
     if not audio.any():
         # macOS hands out pure zeros instead of an error when access is denied.
         return "the mic only gives silence; allow Microphone access in Privacy & Security"
-    if np.sqrt(np.mean(audio**2)) < SILENCE_RMS:
-        return "nothing heard (too quiet)"
     return None
 
 
@@ -86,6 +85,7 @@ class Parole(rumps.App):
             self.last_item,
             None,  # separator
             rumps.MenuItem("Copy last dictation", callback=self.copy_last),
+            rumps.MenuItem("Edit vocabulary…", callback=self.edit_vocabulary),
             self.fast_item,
             None,
             rumps.MenuItem("Quit Parole", callback=self.quit),
@@ -96,6 +96,9 @@ class Parole(rumps.App):
         self.is_recording = False
         self.last_text = ""  # kept in memory only, for "Copy last dictation"
         self.transcriber = Transcriber()
+        self.voice = None  # loaded by the worker, with Whisper
+        self.vocabulary = Vocabulary()
+        self.vocabulary.ensure_file()
         self.shortcut = Shortcut(on_start=self.start_recording, on_stop=self.stop_recording)
 
     def run(self):
@@ -134,6 +137,9 @@ class Parole(rumps.App):
             pasteboard = NSPasteboard.generalPasteboard()
             pasteboard.clearContents()
             pasteboard.setString_forType_(self.last_text, NSPasteboardTypeString)
+
+    def edit_vocabulary(self, _):
+        subprocess.Popen(["open", "-t", self.vocabulary.path])  # opens in TextEdit
 
     def quit(self, _):
         self.shortcut.stop()
@@ -178,6 +184,7 @@ class Parole(rumps.App):
         start = time.perf_counter()
         try:
             self.transcriber.warm_up()
+            self.voice = VoiceDetector()
         except Exception as error:
             log(f"Could not load the offline model: {error}")
             self.show("error", "Speech model failed to load; run check_setup.py")
@@ -211,7 +218,12 @@ class Parole(rumps.App):
             return
 
         transcribe_start = time.perf_counter()
-        text, language = self.transcriber.transcribe(audio)
+        speech = self.voice.trim(audio)
+        if speech is None:
+            log("Skipped: no speech detected")
+            self.show("idle", "Skipped: no speech detected")
+            return
+        text, language = self.transcriber.transcribe(speech, self.vocabulary.prompt())
         transcribed_at = time.perf_counter()
         if not text:
             log("Nothing recognized")
@@ -230,10 +242,9 @@ class Parole(rumps.App):
             self.show("error", "Paste failed; use Copy last dictation", last=f"Last: {text[:40]}")
             return
 
-        seconds = len(audio) / SAMPLE_RATE
         total_ms = (paste_sent_at - released_at) * 1000
         log(
-            f"  audio {seconds:.1f}s | latency {total_ms:.0f} ms "
+            f"  audio {len(audio) / SAMPLE_RATE:.1f}s, speech {len(speech) / SAMPLE_RATE:.1f}s | latency {total_ms:.0f} ms "
             f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms via {self.transcriber.last_path}, "
             f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)"
         )

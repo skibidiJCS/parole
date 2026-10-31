@@ -73,7 +73,34 @@ Hold **Shift + Right Command** (either Shift, either order), speak, release. Rel
 | warning triangle| something needs attention (see the menu)     |
 
 The menu shows the status, the last latency and which path produced it (`fast` / `full` / `long`),
-**Copy last dictation** (in memory only, useful if a paste failed), the **Fast mode** toggle, and **Quit Parole**.
+**Copy last dictation** (in memory only, useful if a paste failed), **Edit vocabulary…**, the **Fast mode** toggle, and **Quit Parole**.
+
+## Custom vocabulary
+
+**Edit vocabulary…** opens `~/Library/Application Support/Parole/vocabulary.txt` in TextEdit.
+Write names, jargon and acronyms one per line, exactly as you want them spelled; lines starting with `#` are ignored.
+Changes apply to the next dictation, with no restart.
+
+The words are given to Whisper as a *prompt*: text it reads as if it came just before your audio, so it reuses those spellings.
+It's a hint, not a rule: it fixes words Whisper half-recognises, not words it can't hear at all.
+Keep the list to a few dozen entries (Whisper reads at most ~200 tokens of prompt).
+
+Synthetic test (macOS `say` voices, vocabulary `Jiacai, Parole, MLX, Ollama, Kubernetes, py2app, pynput, rumps`):
+
+| Said                                   | Without vocabulary (full)          | With vocabulary, full          | With vocabulary, fast         |
+|----------------------------------------|------------------------------------|--------------------------------|-------------------------------|
+| "… sync with Ollama"                   | Alamot                             | Ollama                         | Ollama                        |
+| "Demande à Jiacai … Kubernetes et Ollama" | J.A.K.E. … Hubert N.T.O.L.A.M.A. | Jiacai … Kubernetes et Ollama  | Jiacai … Kuberne Teolama      |
+| "The py2app bundle uses … pynput"      | Pi 2 app … pinepit                 | py2app … pynput                | py2app … pineput              |
+
+The full window benefits most; turn Fast mode off if accuracy on your jargon matters more than speed.
+
+## Voice detection
+
+Before Whisper runs, Silero VAD (a ~2 MB model, 4-20 ms per dictation on one CPU core) checks whether anyone spoke.
+Without it, Whisper turns silence or noise into text ("Thank you.", or a word from your vocabulary).
+It also trims the silence before and after your speech, which makes fast mode faster
+(a 7.7 s recording with 2 s of silence on each side became 4.0 s of speech, transcribed in 363 ms).
 Parole.app logs timings and errors (no transcripts) to `~/Library/Logs/Parole.log`.
 From Terminal, the log includes each transcript; Ctrl+C there also quits.
 
@@ -87,6 +114,8 @@ Your clipboard is restored 200 ms after each paste; anything you copy in the mea
 | `hotkey.py`      | Shift + Right Command hold-to-talk (pynput)                   |
 | `recorder.py`    | microphone capture into memory (16 kHz mono)                  |
 | `transcriber.py` | Whisper: fast short window, full 30 s window, long fallback   |
+| `voice.py`       | Silero VAD: skip silence/noise, trim around the speech        |
+| `vocabulary.py`  | your word list, turned into a Whisper prompt                  |
 | `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration          |
 | `check_setup.py` | one-off setup and permissions check                           |
 | `setup.py`       | py2app build settings for Parole.app                          |
@@ -113,9 +142,8 @@ Whisper pads every clip to 30 s, so its encoder costs ~1 s whatever you say.
 | EN 6.8 s              | 382 ms  | 1133 ms | yes                  |
 | EN 7.5 s              | 577 ms  | 1168 ms | yes                  |
 
-Faint noise is normally rejected (9/9 fixed samples), but fast mode once turned random noise into
-"Thank you." A real voice-activity detector (Silero VAD, phase 5) should fix that.
-Live numbers with a real voice are still to be measured.
+Noise and silence never reach Whisper since Silero VAD was added (15/15 synthetic noise/silence clips rejected).
+The vocabulary prompt adds 0-100 ms. Live numbers with a real voice are still to be measured.
 
 Latency in the log = key release → Cmd+V sent; the target app may draw the text slightly later.
 
@@ -128,5 +156,5 @@ Latency in the log = key release → Cmd+V sent; the target app may draw the tex
 5. Live streaming bubble
 6. Cleanup with a local LLM (Ollama)
 7. Command mode
-8. Settings
+8. Settings (custom vocabulary done: Edit vocabulary…)
 9. ~~Package as Parole.app~~ (alias mode, in /Applications; launch at login via Login Items), confirmed working October 31, 2026

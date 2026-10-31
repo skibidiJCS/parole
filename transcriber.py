@@ -64,23 +64,28 @@ class Transcriber:
         self.tokenizer = get_tokenizer(self.model.is_multilingual, num_languages=self.model.num_languages)
         self.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
 
-    def transcribe(self, audio):
-        """Return (text, language) for a 16 kHz mono float32 array."""
+    def transcribe(self, audio, prompt=""):
+        """Return (text, language) for a 16 kHz mono float32 array.
+
+        `prompt` is text Whisper reads as if it came just before the audio.
+        Listing names and jargon there makes it reuse those spellings.
+        """
+        prompt = prompt or None
         if len(audio) > N_SAMPLES:
             self.last_path = "long"
-            return self._transcribe_long(audio)
+            return self._transcribe_long(audio, prompt)
 
         # Audio -> mel spectrogram (a picture of which frequencies are loud
         # over time), padded to 30 s. Fast mode only uses the start of it.
         mel = log_mel_spectrogram(pad_or_trim(mx.array(audio)), n_mels=self.model.dims.n_mels)
         if self.fast:
             window = min(FULL_WINDOW, math.ceil(len(audio) / SAMPLE_RATE) + 1)
-            text, language = self._transcribe_short(mel, window)
+            text, language = self._transcribe_short(mel, window, prompt)
             if text:
                 self.last_path = "fast"
                 return text, language
         self.last_path = "full"
-        return self._transcribe_full(mel)
+        return self._transcribe_full(mel, prompt)
 
     def _encode(self, mel, window):
         """Run the encoder once, then detect the language from its output."""
@@ -90,23 +95,26 @@ class Transcriber:
         _, language_probs = self.model.detect_language(features)
         return features, max(language_probs[0], key=language_probs[0].get)
 
-    def _transcribe_full(self, mel):
+    def _transcribe_full(self, mel, prompt):
         features, language = self._encode(mel, FULL_WINDOW)
-        result = decode(self.model, features, DecodingOptions(language=language, without_timestamps=True))[0]
+        options = DecodingOptions(language=language, without_timestamps=True, prompt=prompt)
+        result = decode(self.model, features, options)[0]
         # Whisper sometimes "hears" words in noise (e.g. "Thank you."). Its own
         # rule: if it thinks there's no speech AND it's unsure of the text, drop it.
         if result.no_speech_prob > 0.6 and result.avg_logprob < -1.0:
             return "", language
         return clean(result.text), language
 
-    def _transcribe_short(self, mel, window):
+    def _transcribe_short(self, mel, window, prompt):
         """Fast mode. Returns ("", language) whenever the result can't be trusted."""
         # Cap the tokens so a repeating decoder stops quickly (~6 per second of
         # audio is plenty for speech, plus room for the timestamp tokens).
         sample_len = window * 6 + 12
         with self._encoder_window(window * MEL_FRAMES_PER_SECOND // 2):
             features, language = self._encode(mel, window)
-            options = DecodingOptions(language=language, without_timestamps=False, sample_len=sample_len)
+            options = DecodingOptions(
+                language=language, without_timestamps=False, sample_len=sample_len, prompt=prompt
+            )
             result = decode(self.model, features, options)[0]
 
         if result.avg_logprob < FAST_MIN_LOGPROB:
@@ -162,9 +170,11 @@ class Transcriber:
             segments.append(self.tokenizer.decode(words).strip())
         return segments, False
 
-    def _transcribe_long(self, audio):
+    def _transcribe_long(self, audio, prompt):
         # Over 30 s, let mlx_whisper slide its 30 s window over the audio.
-        result = mlx_whisper.transcribe(audio, path_or_hf_repo=self.model_name, condition_on_previous_text=False)
+        result = mlx_whisper.transcribe(
+            audio, path_or_hf_repo=self.model_name, condition_on_previous_text=False, initial_prompt=prompt
+        )
         return clean(result["text"]), result.get("language")
 
 
