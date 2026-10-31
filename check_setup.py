@@ -16,7 +16,7 @@ import sys
 import time
 
 # The model is already in ~/.cache/huggingface, so never contact the internet.
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ["HF_HUB_OFFLINE"] = "1"
 
 MODEL = "mlx-community/whisper-large-v3-turbo"
 SAMPLE_RATE = 16_000  # Whisper expects 16 kHz mono audio
