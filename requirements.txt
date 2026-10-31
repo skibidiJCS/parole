@@ -1,0 +1,5 @@
+mlx-whisper==0.4.3   # speech-to-text on the Apple Silicon GPU
+sounddevice==0.5.6   # microphone capture
+numpy==2.5.4         # audio buffers
+pynput==1.8.2        # global hotkey + simulated Cmd+V
+rumps==0.4.0         # menu bar app
