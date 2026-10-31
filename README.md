@@ -5,7 +5,8 @@ Hold a hotkey, speak French or English, release, and the text is pasted into the
 Everything runs locally; audio is never written to disk.
 
 Project folder: `/Users/jiacai/Documents/Parole`.
-Current version prints the transcription in Terminal. Pasting and the menu bar are upcoming phases.
+Current version pastes into the focused app and also prints the transcription in Terminal.
+Automatic pasting across apps was confirmed by the user on October 31, 2026; the menu bar is an upcoming phase.
 
 ## Setup
 
@@ -54,21 +55,28 @@ cd /Users/jiacai/Documents/Parole
 .venv/bin/python parole.py
 ```
 
-Hold **Right Command**, speak, release. The text and the latency (key release → text ready) are printed.
+Hold **Shift + Right Command**, speak, then release either key to stop. Either Shift key works.
+Release both keys before pasting. Text is pasted into the focused app, and text plus latency are printed in Terminal.
 Ctrl+C to quit.
 
-First live test: after `Model ready`, hold Right Command, say a sentence, and release.
+First live test: after `Model ready`, focus a blank TextEdit document, hold Shift + Right Command, say a sentence, and release both keys.
 Allow Terminal microphone access if macOS asks; retry the recording after granting it.
 A quick tap should print `too short`; a quiet recording should print `nothing heard`.
 Live microphone and Right Command recording confirmed by the user on October 31, 2026.
 Two live dictations took 1151 ms and 1199 ms from key release to text ready.
-The Accessibility warning remained visible; automatic pasting still needs verification.
+The user subsequently confirmed Shift + Right Command recording and automatic pasting across apps.
+Clipboard restoration and error handling passed automated checks.
+Phase 3 test: copy some text first, dictate in TextEdit, then press Cmd+V afterward.
+The dictation should appear automatically; Cmd+V afterward should paste your original copied text.
+If pasting reports a permission error, enable Terminal under Device Control and Data Access,
+quit Terminal completely with Cmd+Q, reopen it, and run Parole again.
 
 ## Files
 
 | File             | Role                                                   |
 |------------------|--------------------------------------------------------|
 | `parole.py`      | hotkey listener + main loop                            |
+| `paster.py`      | clipboard snapshot, Cmd+V, and clipboard restoration    |
 | `recorder.py`    | microphone capture into memory (16 kHz mono)           |
 | `transcriber.py` | Whisper: encode once, detect language, decode          |
 | `check_setup.py` | one-off setup and permissions check                    |
@@ -81,11 +89,15 @@ calling encoder → language detection → decoder ourselves brings it to ~1.1 s
 Retested after relocation: synthetic English 1148 ms, French 1154 ms; both transcribed correctly.
 These measure transcription only, not live microphone capture or pasting.
 
+Paste latency measures key release to sending Cmd+V; target apps may display it slightly later.
+Clipboard restoration happens after a 200 ms wait. Every item and data format is preserved;
+a newer copy made during that wait is left alone. Slow apps may need a longer wait.
+
 ## Roadmap
 
 1. ~~Setup~~
 2. ~~Hold hotkey, record, transcribe, print~~
-3. Paste into the active app
+3. ~~Paste into the active app~~
 4. Menu bar app
 5. Live streaming bubble
 6. Cleanup with a local LLM (Ollama)

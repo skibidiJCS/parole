@@ -1,4 +1,4 @@
-"""Parole, phase 2: hold Right Command, speak, release, see the text printed.
+"""Parole, phase 3: hold Shift + Right Command, speak, release, paste into the focused app.
 
     .venv/bin/python parole.py
 
@@ -11,15 +11,21 @@ A queue hands recordings from the first thread to the second.
 """
 
 import queue
+import threading
 import time
 
 import numpy as np
 from pynput import keyboard
 
+from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
 from transcriber import Transcriber
 
 HOTKEY = keyboard.Key.cmd_r  # Right Command
+SHIFT_KEYS = {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
+held_keys = set()
+hotkey_released = threading.Event()
+hotkey_released.set()
 MIN_SECONDS = 0.3  # shorter presses are treated as accidental
 SILENCE_RMS = 0.002  # below this average loudness, nobody spoke
 
@@ -30,8 +36,12 @@ is_recording = False
 
 def on_press(key):
     global is_recording
+    if key != HOTKEY and key not in SHIFT_KEYS:
+        return
+    held_keys.add(key)
+    hotkey_released.clear()
     # Holding a key makes macOS repeat the press event; only react to the first.
-    if key != HOTKEY or is_recording:
+    if HOTKEY not in held_keys or not (held_keys & SHIFT_KEYS) or is_recording:
         return
     try:
         recorder.start()
@@ -44,7 +54,11 @@ def on_press(key):
 
 def on_release(key):
     global is_recording
-    if key != HOTKEY or not is_recording:
+    held_keys.discard(key)
+    if HOTKEY not in held_keys and not (held_keys & SHIFT_KEYS):
+        hotkey_released.set()
+    # Either half of the shortcut ending stops the recording.
+    if not is_recording or (HOTKEY in held_keys and held_keys & SHIFT_KEYS):
         return
     released_at = time.perf_counter()
     try:
@@ -85,10 +99,11 @@ def main():
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
     if not listener.IS_TRUSTED:
-        print("Warning: no Accessibility permission, the hotkey won't be seen in other apps.")
-        print("Add your terminal in Settings > Privacy & Security > Accessibility and Input Monitoring.")
+        print("Warning: Accessibility is not granted. Automatic pasting is unavailable.")
+        print("Enable Terminal in Settings > Privacy & Security > Device Control and Data Access (Accessibility).")
+        print("Also enable Input Monitoring, then quit Terminal with Cmd+Q and reopen it.")
 
-    print("Hold Right Command and speak. Ctrl+C to quit.\n")
+    print("Hold Shift + Right Command and speak. Release either key to stop. Ctrl+C to quit.\n")
     try:
         while True:
             audio, released_at = recordings.get()  # waits, using no CPU
@@ -103,13 +118,25 @@ def main():
             except Exception as error:
                 print(f"Could not transcribe this recording: {error}\n")
                 continue
-            done = time.perf_counter()
+            transcribed_at = time.perf_counter()
 
             print(f"[{language}] {text or '(no words recognized)'}")
+            if not text:
+                continue
+            try:
+                # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
+                if not hotkey_released.wait(timeout=2):
+                    raise RuntimeError("Release Shift and Right Command, then try again.")
+                paste_sent_at = paste_text(text)
+            except Exception as error:
+                print(f"Paste failed: {error}")
+                print("The transcription is printed above; you can copy it manually.\n")
+                continue
             print(
                 f"  audio {len(audio) / SAMPLE_RATE:.1f}s | "
-                f"latency {(done - released_at) * 1000:.0f} ms "
-                f"(transcribe {(done - transcribe_start) * 1000:.0f} ms)\n"
+                f"latency {(paste_sent_at - released_at) * 1000:.0f} ms "
+                f"(transcribe {(transcribed_at - transcribe_start) * 1000:.0f} ms, "
+                f"paste {(paste_sent_at - transcribed_at) * 1000:.0f} ms)\n"
             )
     except KeyboardInterrupt:
         print("\nBye.")
