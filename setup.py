@@ -15,6 +15,7 @@ setup(
     app=["parole.py"],
     options={
         "py2app": {
+            "iconfile": "icon/Parole.icns",  # drawn by icon/make_icon.py
             "plist": {
                 "CFBundleName": "Parole",
                 "CFBundleDisplayName": "Parole",
