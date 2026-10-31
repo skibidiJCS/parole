@@ -62,13 +62,21 @@ cd /Users/jiacai/Documents/Parole
 ```
 
 A mic icon appears in the menu bar (an hourglass while the model loads, ~3 s).
-Hold **Shift + Right Command** (either Shift, either order), speak, release. Release both keys so the paste is a plain Cmd+V.
+Two ways to dictate with **Shift + Right Command** (either Shift, either order):
+
+- **Hold** (push-to-talk): hold the keys while you speak, release to paste.
+- **Tap** (hands-free): tap the keys (under 0.3 s) and just talk; the icon becomes a red circled mic.
+  Tap again to stop and paste. A forgotten hands-free recording stops by itself after 10 minutes.
+
+Pressing another key while holding the shortcut (e.g. Shift+Cmd+4 for a screenshot) cancels the recording,
+so other shortcuts don't trigger dictation. Recordings over 30 s use Whisper's slower sliding-window path.
 
 | Icon            | Meaning                                       |
 |-----------------|-----------------------------------------------|
 | hourglass       | loading the model                             |
 | mic             | ready                                         |
 | red filled mic  | recording                                     |
+| red circled mic | hands-free recording (tap again to stop)      |
 | waveform        | transcribing                                  |
 | warning triangle| something needs attention (see the menu)     |
 

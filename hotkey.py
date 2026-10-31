@@ -4,6 +4,8 @@ pynput calls our handlers from its own thread for every key event. We keep a
 set of the relevant keys currently held and report two moments:
   - on_start: the moment Right Command and a Shift are both down (either order)
   - on_stop:  the moment either part is let go
+  - on_cancel: another key was pressed while the shortcut was held, so it
+    was part of a different shortcut (e.g. Shift+Cmd+4 for a screenshot)
 Key-repeat events while holding are ignored. `released` is set once *all*
 shortcut keys are up; pasting waits for it, because a still-held Shift would
 turn Cmd+V into Cmd+Shift+V.
@@ -42,9 +44,10 @@ class _Listener(keyboard.Listener):
 
 
 class Shortcut:
-    def __init__(self, on_start, on_stop):
+    def __init__(self, on_start, on_stop, on_cancel=lambda: None):
         self.on_start = on_start
         self.on_stop = on_stop
+        self.on_cancel = on_cancel
         self.held = set()
         self.active = False
         self.released = threading.Event()
@@ -71,6 +74,9 @@ class Shortcut:
 
     def _on_press(self, key):
         if key not in SHORTCUT_KEYS:
+            if self.active:
+                self.active = False
+                self.on_cancel()
             return
         self.held.add(key)
         self.released.clear()

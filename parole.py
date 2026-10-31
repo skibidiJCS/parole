@@ -44,7 +44,9 @@ from transcriber import Transcriber
 from vocabulary import Vocabulary
 from voice import VoiceDetector
 
-MIN_SECONDS = 0.3  # shorter presses are treated as accidental
+MIN_SECONDS = 0.3  # shorter recordings are treated as accidental
+TAP_SECONDS = 0.3  # a press shorter than this starts hands-free recording
+MAX_HANDS_FREE = 10 * 60  # seconds; hands-free recording stops by itself after this
 READY = "Ready: hold ⇧ + right ⌘ and speak"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
@@ -53,6 +55,7 @@ ICONS = {
     "loading": "hourglass",
     "idle": "mic",
     "recording": "mic.fill",
+    "hands_free": "mic.circle.fill",
     "transcribing": "waveform",
     "error": "exclamationmark.triangle",
 }
@@ -99,13 +102,22 @@ class Parole(rumps.App):
         self.recorder = Recorder()
         self.recordings = queue.Queue()  # items: (audio, time the keys were released)
         self.is_recording = False
+        self.hands_free = False  # recording continues after the keys are released
+        self.ignore_release = False  # the press that stopped hands-free mode
+        self.pressed_at = 0.0
+        self.auto_stop = None  # timer that ends a forgotten hands-free recording
+        # The key listener, the auto-stop timer and Quit can all touch the
+        # recording state; the lock makes them take turns.
+        self.lock = threading.Lock()
         self.last_text = ""  # kept in memory only, for "Copy last dictation"
         self.transcriber = Transcriber()
         self.voice = None  # loaded by the worker, with Whisper
         self.vocabulary = Vocabulary()
         self.vocabulary.ensure_file()
         self.spacer = Spacer()
-        self.shortcut = Shortcut(on_start=self.start_recording, on_stop=self.stop_recording)
+        self.shortcut = Shortcut(
+            on_start=self.start_recording, on_stop=self.stop_recording, on_cancel=self.cancel_recording
+        )
 
     def run(self):
         # Menu bar only: no Dock icon, and the app never takes focus from the
@@ -125,7 +137,8 @@ class Parole(rumps.App):
         image.setTemplate_(True)  # let macOS colour it to match the menu bar
         button.setImage_(image)
         button.setTitle_("")
-        button.setContentTintColor_(NSColor.systemRedColor() if state == "recording" else None)
+        red = state in ("recording", "hands_free")
+        button.setContentTintColor_(NSColor.systemRedColor() if red else None)
         if status:
             self.status_item.title = status
         if last:
@@ -153,6 +166,8 @@ class Parole(rumps.App):
 
     def quit(self, _):
         self.shortcut.stop()
+        if self.auto_stop:
+            self.auto_stop.cancel()
         try:
             self.recorder.stop()  # in case Quit is clicked mid-recording
         except Exception as error:
@@ -160,20 +175,70 @@ class Parole(rumps.App):
         rumps.quit_application()
 
     # --- Shortcut callbacks (pynput's thread: keep them quick) -------------
+    #
+    # Two ways to dictate with the same shortcut:
+    #   hold  -> push-to-talk: recording stops when you let go
+    #   tap   -> hands-free: recording continues; tap again to stop
 
-    def start_recording(self):
-        try:
-            self.recorder.start()
-        except Exception as error:
-            log(f"Could not open the microphone: {error}")
-            self.show("error", "Microphone unavailable; check Privacy & Security > Microphone")
-            return
-        self.is_recording = True
+    def start_recording(self):  # shortcut pressed
+        with self.lock:
+            if self.hands_free:
+                # This press ends a hands-free recording; its release does nothing.
+                self.hands_free = False
+                self.ignore_release = True
+                self.finish_recording()
+                return
+            try:
+                self.recorder.start()
+            except Exception as error:
+                log(f"Could not open the microphone: {error}")
+                self.show("error", "Microphone unavailable; check Privacy & Security > Microphone")
+                return
+            self.is_recording = True
+            self.pressed_at = time.perf_counter()
         self.show("recording", "Recording…")
 
-    def stop_recording(self):
-        if not self.is_recording:
-            return
+    def stop_recording(self):  # shortcut released
+        with self.lock:
+            if self.ignore_release:
+                self.ignore_release = False
+                return
+            if not self.is_recording:
+                return
+            if time.perf_counter() - self.pressed_at < TAP_SECONDS:
+                self.hands_free = True  # a tap: keep recording
+                self.auto_stop = threading.Timer(MAX_HANDS_FREE, self.stop_forgotten)
+                self.auto_stop.daemon = True
+                self.auto_stop.start()
+                self.show("hands_free", "Hands-free: tap ⇧ + right ⌘ again to stop")
+                return
+            self.finish_recording()
+
+    def cancel_recording(self):  # another key pressed while holding the shortcut
+        with self.lock:
+            if not self.is_recording or self.hands_free:
+                return
+            try:
+                self.recorder.stop()  # throw the audio away
+            except Exception as error:
+                log(f"Could not close the microphone: {error}")
+            self.is_recording = False
+        log("Cancelled: the shortcut was part of another key combination")
+        self.show("idle", READY)
+
+    def stop_forgotten(self):  # timer thread
+        with self.lock:
+            if not self.hands_free:
+                return
+            self.hands_free = False
+            log(f"Hands-free recording stopped after {MAX_HANDS_FREE // 60} minutes")
+            self.finish_recording()
+
+    def finish_recording(self):
+        """Stop the mic and queue the audio for the worker. Call with the lock held."""
+        if self.auto_stop:
+            self.auto_stop.cancel()
+            self.auto_stop = None
         released_at = time.perf_counter()
         try:
             audio = self.recorder.stop()
