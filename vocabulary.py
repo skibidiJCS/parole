@@ -12,10 +12,13 @@ Words (including the right side of replacements) are joined into a short
 dictation, which makes it reuse those spellings. That's only a hint, so the
 replacements are applied afterwards as a guaranteed fix for words Whisper
 keeps hearing the same wrong way.
+
+Parole also adds lines itself when you correct a dictation (see learning.py).
 """
 
 import os
 import re
+import threading
 
 PATH = os.path.expanduser("~/Library/Application Support/Parole/vocabulary.txt")
 ARROW = "->"
@@ -29,6 +32,7 @@ TEMPLATE = """\
 # Keep it to a few dozen entries: Whisper only reads the last ~200 tokens.
 Parole
 """
+LEARNED_HEADER = "# Learned from your corrections (delete a line to undo it):"
 
 
 def heard_pattern(heard):
@@ -41,8 +45,9 @@ class Vocabulary:
     def __init__(self, path=PATH):
         self.path = path
         self._modified = None  # file timestamp when we last read it
-        self._prompt = ""
+        self._words = []
         self._replacements = []  # (compiled pattern, replacement text)
+        self._lock = threading.Lock()  # learning writes from another thread
 
     def ensure_file(self):
         """Create the file with instructions the first time."""
@@ -51,17 +56,45 @@ class Vocabulary:
             with open(self.path, "w") as file:
                 file.write(TEMPLATE)
 
-    def prompt(self):
-        """Return the Whisper prompt for the file as it is now ("" if empty)."""
-        self._refresh()
-        return self._prompt
+    def prompt(self, extra=()):
+        """Return the Whisper prompt: the file's words, then `extra` ones ("" if none)."""
+        with self._lock:
+            self._refresh()
+            words = list(dict.fromkeys(self._words + list(extra)))  # drop duplicates, keep order
+        return ", ".join(words) + "." if words else ""
+
+    def words(self):
+        """The words in the file (including the right side of replacements)."""
+        with self._lock:
+            self._refresh()
+            return list(self._words)
 
     def fix(self, text):
         """Apply the replacements to a transcript."""
-        self._refresh()
-        for pattern, wanted in self._replacements:
+        with self._lock:
+            self._refresh()
+            replacements = self._replacements
+        for pattern, wanted in replacements:
             text = pattern.sub(wanted, text)
         return text
+
+    def learn(self, heard, wanted):
+        """Add the replacement `heard -> wanted`, unless `heard` is already replaced. True if added."""
+        with self._lock:
+            self._refresh()
+            if any(pattern.fullmatch(heard) for pattern, _ in self._replacements):
+                return False
+            self.ensure_file()
+            with open(self.path) as file:
+                content = file.read()
+            with open(self.path, "a") as file:
+                if content and not content.endswith("\n"):
+                    file.write("\n")
+                if LEARNED_HEADER not in content:
+                    file.write("\n" + LEARNED_HEADER + "\n")
+                file.write(f"{heard} {ARROW} {wanted}\n")
+            self._modified = None  # re-read on next use
+            return True
 
     def _refresh(self):
         # Re-read only when the file has been saved since last time, so edits
@@ -69,7 +102,7 @@ class Vocabulary:
         try:
             modified = os.path.getmtime(self.path)
         except FileNotFoundError:
-            self._prompt, self._replacements = "", []
+            self._words, self._replacements = [], []
             return
         if modified == self._modified:
             return
@@ -86,7 +119,6 @@ class Vocabulary:
                         words.append(wanted)
                 else:
                     words.append(line)
-        words = list(dict.fromkeys(words))  # drop duplicates, keep order
-        self._prompt = ", ".join(words) + "." if words else ""
+        self._words = words
         self._replacements = replacements
         self._modified = modified

@@ -104,3 +104,32 @@ def caret_frame(field):
 
 def role(element):
     return attribute(element, "AXRole")
+
+
+def is_secure(field):
+    """Password fields: Parole never reads or learns from them."""
+    return "AXSecureTextField" in (role(field), attribute(field, "AXSubrole"))
+
+
+def character_count(field):
+    """How many characters a text field holds, or None if the app doesn't say."""
+    count = attribute(field, "AXNumberOfCharacters")
+    if count is None:
+        value = attribute(field, "AXValue")
+        count = len(value) if isinstance(value, str) else None
+    return count
+
+
+def text(field, start, length):
+    """`length` characters of the field's text from `start`, or None if the app doesn't say.
+
+    Asking for just that range keeps huge documents from being copied over;
+    some fields only expose their whole text (AXValue), so we slice that instead.
+    """
+    if length <= 0:
+        return ""
+    value = parameterized(field, "AXStringForRange", AXValueCreate(kAXValueCFRangeType, (start, length)))
+    if value:
+        return str(value)
+    value = attribute(field, "AXValue")
+    return str(value)[start : start + length] if isinstance(value, str) else None

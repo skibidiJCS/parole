@@ -131,6 +131,17 @@ LINKING_STARTS = set("and but or so because then which that et mais ou donc parc
 KEEP_CAPITAL = {"I", "I'm", "I'll", "I've", "I'd"}
 
 
+def lowercase_first(text, keep=()):
+    """"Go tomorrow" -> "go tomorrow", for text that carries on a sentence.
+
+    Keeps "I", acronyms ("IBM") and the names in `keep`.
+    """
+    first = text.split(" ", 1)[0].strip(",.!?;:")
+    if first in KEEP_CAPITAL or first[1:].isupper() or first in keep:
+        return text
+    return text[:1].lower() + text[1:]
+
+
 def join_pieces(before, after, hesitation=True):
     """Join text transcribed before and after a pause (Whisper did them separately).
 
@@ -143,9 +154,7 @@ def join_pieces(before, after, hesitation=True):
     last_word = normalise(before.split()[-1]) if before.split() else ""
     first_word = normalise(after.split()[0]) if after.split() else ""
     if last_word in OPEN_ENDINGS or first_word in LINKING_STARTS:
-        first, _, rest = after.partition(" ")
-        if first.strip(",.") not in KEEP_CAPITAL and not first[1:].isupper():  # keep "I", "IBM"
-            after = first[:1].lower() + first[1:] + (" " + rest if rest else "")
+        after = lowercase_first(after)
         return before.rstrip(" .,;") + ("... " if hesitation else " ") + after
     if before[-1:].isalnum():
         before += "."  # Whisper sometimes leaves the last sentence open

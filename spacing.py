@@ -15,7 +15,6 @@ Some apps (VS Code, some web pages) don't answer. Then we fall back to:
 import time
 
 from AppKit import NSWorkspace
-from ApplicationServices import AXValueCreate, kAXValueCFRangeType
 
 import ax
 
@@ -33,18 +32,7 @@ def char_before_cursor():
     if text_range is None:
         return None
     start = text_range[0]
-    if start == 0:
-        return ""
-    # Ask for just that one character, so huge documents aren't copied over.
-    one_char = AXValueCreate(kAXValueCFRangeType, (start - 1, 1))
-    text = ax.parameterized(field, "AXStringForRange", one_char)
-    if text:
-        return str(text)
-    # Some fields only expose their whole text.
-    value = ax.attribute(field, "AXValue")
-    if isinstance(value, str) and start <= len(value):
-        return value[start - 1]
-    return None
+    return "" if start == 0 else ax.text(field, start - 1, 1)
 
 
 def wants_space(before):

@@ -36,9 +36,11 @@ from AppKit import (
 )
 from PyObjCTools import AppHelper
 
+import context
 from bubble import Bubble
 from cleanup import join_pieces, remove_fillers, remove_repeats
 from hotkey import Shortcut
+from learning import Learner
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
 from spacing import Spacer
@@ -107,6 +109,8 @@ class Parole(rumps.App):
         self.repeats_item.state = True
         self.live_item = rumps.MenuItem("Live preview", callback=self.toggle_live)
         self.live_item.state = True
+        self.learn_item = rumps.MenuItem("Learn from corrections", callback=self.toggle_learn)
+        self.learn_item.state = True
         self.menu = [
             self.status_item,
             self.last_item,
@@ -116,6 +120,7 @@ class Parole(rumps.App):
             self.fast_item,
             self.repeats_item,
             self.live_item,
+            self.learn_item,
             None,
             rumps.MenuItem("Quit Parole", callback=self.quit),
         ]
@@ -138,6 +143,8 @@ class Parole(rumps.App):
         self.spacer = Spacer()
         self.bubble = Bubble()
         self.live = None  # LivePreview while recording with the preview on
+        self.context = context.Context()  # the text around the cursor (worker thread only)
+        self.learner = Learner(self.vocabulary, on_learned=self.learned)
         self.shortcut = Shortcut(
             on_start=self.start_recording, on_stop=self.stop_recording, on_cancel=self.cancel_recording
         )
@@ -181,6 +188,10 @@ class Parole(rumps.App):
     def toggle_live(self, item):
         item.state = not item.state
         log(f"Live preview {'on' if item.state else 'off'}")
+
+    def toggle_learn(self, item):
+        item.state = not item.state
+        log(f"Learn from corrections {'on' if item.state else 'off'}")
 
     def copy_last(self, _):
         if self.last_text:
@@ -279,6 +290,10 @@ class Parole(rumps.App):
         self.show("transcribing", "Transcribing…")
         self.recordings.put((audio, released_at))
 
+    def learned(self, heard, wanted):  # learner's timer thread, or the worker
+        log(f"Learned: {heard} -> {wanted}" if self.log_transcripts else "Learned a correction")
+        AppHelper.callAfter(setattr, self.last_item, "title", f"Learned: {heard} → {wanted}")
+
     # --- Worker thread -----------------------------------------------------
 
     def work(self):
@@ -314,6 +329,7 @@ class Parole(rumps.App):
                 item = "refresh"
             try:
                 if item == "start":
+                    self.context = context.read()  # for the prompt; read again before pasting
                     if self.live_item.state:
                         self.live = LivePreview()
                         AppHelper.callAfter(self.bubble.show, "Listening…")
@@ -334,7 +350,7 @@ class Parole(rumps.App):
         cut at pauses; join_pieces glues the pieces back, keeping a sentence
         going through a pause and writing a long one as "...".
         """
-        prompt, text, language = self.vocabulary.prompt(), before, None
+        prompt, text, language = self.vocabulary.prompt(extra=self.context.terms), before, None
         previous_end = 0  # `audio` starts right after the text `before`
         for start, end in self.voice.speech_pieces(audio):
             piece, piece_language = self.transcriber.transcribe(audio[start:end], prompt)
@@ -412,8 +428,14 @@ class Parole(rumps.App):
             # A physically held Shift would turn Cmd+V into Cmd+Shift+V.
             if not self.shortcut.released.wait(timeout=2):
                 raise RuntimeError("release Shift and Right Command, then try again")
+            here = context.read()
+            text = context.fit(text, here, names=self.vocabulary.words())  # "go home" mid-sentence, no "." in a search box...
+            self.last_text = text
+            self.learner.finish()  # last look at the previous dictation before this one lands
             paste_sent_at = paste_text(self.spacer.prefix() + text)
             self.spacer.pasted()
+            if self.learn_item.state:
+                self.learner.watch(here, text)
         except Exception as error:
             log(f"Paste failed: {error}")
             self.show("error", "Paste failed; use Copy last dictation", last=f"Last: {text[:40]}")
