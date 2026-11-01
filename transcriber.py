@@ -9,9 +9,9 @@ How Whisper works, in two halves:
 Whisper was trained on 30 s windows, so normally every clip is padded with
 silence to 30 s and the encoder costs ~1 s on an M4 whatever you say.
 
-Fast mode shrinks the window to the clip length + 1 s (at least 6 s: below
-that, language detection mistakes short French for English), so the encoder
-only works on real audio (~150-300 ms). The catch: without the long silence, the
+Fast mode shrinks the window to the clip length + 1 s (at least 10 s: below
+that, Whisper mishears short clips more and takes short French for English),
+so the encoder only works on real audio (~150-300 ms). The catch: without the long silence, the
 decoder doesn't realise the speech has ended and repeats it. We ask for
 timestamps, split the output into segments, and stop at the first segment
 that is an exact repeat or a timestamp past the end of the window. Loops
@@ -19,6 +19,10 @@ inside one segment ("on se voit demain, on se voit demain, ...") are cut at
 the second of three identical copies.
 Whenever fast mode is unsure (nothing found, low confidence, or the text was
 cut off by the token limit) we retry with the full 30 s window.
+
+Both paths also report which stretches of the clip the text covers (from
+the timestamps), so the caller can notice speech Whisper skipped, which it
+does after a pause or when you switch to the other language.
 
 We call the encoder and decoder ourselves rather than mlx_whisper.transcribe(),
 which would run the encoder twice (once to detect the language) and keep its
@@ -45,7 +49,7 @@ from recorder import SAMPLE_RATE  # noqa: E402
 
 MODEL = "mlx-community/whisper-large-v3-turbo"
 FULL_WINDOW = 30  # seconds, what Whisper was trained on
-MIN_WINDOW = 6  # seconds; shorter windows misdetect short French clips as English
+MIN_WINDOW = 10  # seconds; shorter windows mishear short clips (measured: 10% word errors at 6 s, 7% at 10 s)
 LANGUAGES = ("en", "fr")  # the languages you speak; detection picks between these
 MEL_FRAMES_PER_SECOND = 100  # the encoder halves this: 50 features per second
 SECONDS_PER_TIMESTAMP = 0.02  # each timestamp token is 20 ms
@@ -71,10 +75,11 @@ class Transcriber:
         self.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
 
     def transcribe(self, audio, prompt=""):
-        """Return (text, language) for up to 30 s of 16 kHz mono float32 audio.
+        """Return (text, language, covered) for up to 30 s of 16 kHz mono float32 audio.
 
         `prompt` is text Whisper reads as if it came just before the audio.
         Listing names and jargon there makes it reuse those spellings.
+        `covered` lists the (start, end) seconds the text came from.
         """
         prompt = prompt or None
 
@@ -83,10 +88,10 @@ class Transcriber:
         mel = log_mel_spectrogram(pad_or_trim(mx.array(audio)), n_mels=self.model.dims.n_mels)
         if self.fast:
             window = min(FULL_WINDOW, max(MIN_WINDOW, math.ceil(len(audio) / SAMPLE_RATE) + 1))
-            text, language = self._transcribe_short(mel, window, prompt)
+            text, language, covered = self._transcribe_short(mel, window, prompt)
             if text:
                 self.last_path = "fast"
-                return text, language
+                return text, language, covered
         self.last_path = "full"
         return self._transcribe_full(mel, prompt)
 
@@ -100,16 +105,18 @@ class Transcriber:
 
     def _transcribe_full(self, mel, prompt):
         features, language = self._encode(mel, FULL_WINDOW)
-        options = DecodingOptions(language=language, without_timestamps=True, prompt=prompt)
+        options = DecodingOptions(language=language, without_timestamps=False, prompt=prompt)
         result = decode(self.model, features, options)[0]
         # Whisper sometimes "hears" words in noise (e.g. "Thank you."). Its own
         # rule: if it thinks there's no speech AND it's unsure of the text, drop it.
         if result.no_speech_prob > 0.6 and result.avg_logprob < -1.0:
-            return "", language
-        return clean(result.text), language
+            return "", language, []
+        segments, covered, _ = self._segments_within(result.tokens, FULL_WINDOW, prompt)
+        text, _ = first_copy(" ".join(segments))
+        return clean(text), language, covered
 
     def _transcribe_short(self, mel, window, prompt):
-        """Fast mode. Returns ("", language) whenever the result can't be trusted."""
+        """Fast mode. Returns ("", language, []) whenever the result can't be trusted."""
         # Cap the tokens so a repeating decoder stops quickly (~6 per second of
         # audio is plenty for speech, plus room for the timestamp tokens).
         sample_len = window * 6 + 12
@@ -121,12 +128,12 @@ class Transcriber:
             result = decode(self.model, features, options)[0]
 
         if not result.avg_logprob >= FAST_MIN_LOGPROB:  # also catches "not a number"
-            return "", language  # probably noise; let the full window decide
-        segments, stopped = self._segments_within(result.tokens, window)
+            return "", language, []  # probably noise; let the full window decide
+        segments, covered, stopped = self._segments_within(result.tokens, window, prompt)
         text, looped = first_copy(" ".join(segments))
         if not (stopped or looped) and len(result.tokens) >= sample_len:
-            return "", language  # the token cap cut the speech off
-        return clean(text), language
+            return "", language, []  # the token cap cut the speech off
+        return clean(text), language, covered
 
     @contextmanager
     def _encoder_window(self, n_features):
@@ -146,33 +153,51 @@ class Transcriber:
             encoder._positional_embedding = full_embedding
             dims.n_audio_ctx = full_ctx
 
-    def _segments_within(self, tokens, window):
+    def _segments_within(self, tokens, window, prompt=None):
         """Split the output into segments and stop where the repeating starts.
 
         With timestamps the output looks like
             <0.00> Okay sounds good.<1.44><8.44> Okay sounds good.<10.44> ...
         When the decoder starts repeating itself, either the timestamps jump
         past the real audio (<8.44> on a 3 s clip) or the next segment is an
-        exact copy of the previous one. Returns (segments, stopped_early).
+        exact copy of the previous one.
+        A segment that is only a word from the prompt is dropped (see only_prompt).
+        Returns (segments, (start, end) seconds of each, stopped_early).
         """
         first_timestamp = self.tokenizer.timestamp_begin
-        segments, words = [], []
+        segments, covered, words, opened = [], [], [], 0.0
         for token in tokens:
             if token < first_timestamp:
                 words.append(token)
                 continue
-            # A timestamp token closes the segment in progress.
+            seconds = (token - first_timestamp) * SECONDS_PER_TIMESTAMP
+            # A timestamp token closes the segment in progress, or opens the next one.
             if words:
                 text = self.tokenizer.decode(words).strip()
                 if segments and text == segments[-1]:
-                    return segments, True
-                segments.append(text)
+                    return segments, covered, True
+                if not only_prompt(text, prompt):
+                    segments.append(text)
+                    covered.append((opened, min(seconds, window)))
                 words = []
-            if (token - first_timestamp) * SECONDS_PER_TIMESTAMP > window:
-                return segments, True
-        if words:
+            else:
+                opened = seconds
+            if seconds > window:
+                return segments, covered, True
+        if words:  # the last segment never closed: assume it runs to the end
             segments.append(self.tokenizer.decode(words).strip())
-        return segments, False
+            covered.append((opened, window))
+        return segments, covered, False
+
+
+def only_prompt(text, prompt):
+    """True if the text is nothing but a word from the prompt ("Jiacai.").
+
+    When Whisper can't make out a sound (often: the other language), it tends
+    to write a word from the prompt instead: a guess, not something you said.
+    """
+    plain = re.sub(r"[^\w' -]", "", text).strip().lower()
+    return bool(prompt and plain) and plain in {word.strip(" .").lower() for word in prompt.split(",")}
 
 
 def first_copy(text):
@@ -191,7 +216,15 @@ def first_copy(text):
     return text, False
 
 
+# Whisper learned from subtitled videos, so on noise it sometimes writes their credits.
+SUBTITLE_CREDITS = re.compile(
+    r"sous-titr|amara\.org|thanks? (?:you )?for watching|merci d'avoir regard|abonnez-vous|like and subscribe",
+    re.IGNORECASE,
+)
+
+
 def clean(text):
-    """Trim spaces; treat punctuation-only output (e.g. "." on noise) as nothing."""
-    text = text.strip()
+    """Trim spaces; drop subtitle credits; treat punctuation-only output (e.g. "." on noise) as nothing."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    text = " ".join(s for s in sentences if not SUBTITLE_CREDITS.search(s))
     return text if any(c.isalnum() for c in text) else ""

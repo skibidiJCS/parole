@@ -46,7 +46,7 @@ from recorder import SAMPLE_RATE, Recorder
 from spacing import Spacer
 from transcriber import Transcriber
 from vocabulary import Vocabulary
-from voice import MAX_GAP, PADDING, VoiceDetector
+from voice import PADDING, PAUSE, VoiceDetector
 
 MIN_SECONDS = 0.3  # shorter recordings are treated as accidental
 TAP_SECONDS = 0.3  # a press shorter than this starts hands-free recording
@@ -54,6 +54,7 @@ MAX_HANDS_FREE = 10 * 60  # seconds; hands-free recording stops by itself after 
 LIVE_INTERVAL = 0.5  # seconds between live-preview refreshes while recording
 MAX_PENDING = 20  # seconds of speech without a pause before we keep it anyway
 HESITATION = 1.0  # seconds; a pause this long mid-sentence is written "..."
+MISSED_SPEECH = 0.8  # seconds of speech left after the text ends before we transcribe it again
 READY = "Ready: hold ⇧ + right ⌘ and speak"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Parole.log")
 
@@ -81,6 +82,52 @@ def check_audio(audio):
         # macOS hands out pure zeros instead of an error when access is denied.
         return "the mic only gives silence; allow Microphone access in Privacy & Security"
     return None
+
+
+def transcribe_speech(transcriber, voice, audio, prompt="", before=""):
+    """Transcribe the speech in `audio` (any length), continuing the text `before`.
+
+    Returns (all the text, language of the first new piece). The audio is
+    cut at pauses; join_pieces glues the pieces back, keeping a sentence
+    going through a pause and writing a long one as "...".
+    Whisper sometimes skips part of a piece (after a pause, or when you switch
+    language): then the piece is cut where the skipped speech starts and ends,
+    and each part is transcribed on its own.
+    """
+    text, first_language = before, None
+    pieces = [(start, end, True) for start, end in voice.speech_pieces(audio)]
+    previous_end = 0  # `audio` starts right after the text `before`
+    while pieces:
+        start, end, check = pieces.pop(0)
+        piece, language, covered = transcriber.transcribe(audio[start:end], prompt)
+        cuts = missed_speech(voice, audio[start:end], covered) if check and piece else []
+        if cuts:
+            bounds = [start] + [start + cut for cut in cuts] + [end]
+            pieces[:0] = [(a, b, False) for a, b in zip(bounds, bounds[1:])]
+            continue
+        if piece:
+            pause = (start - previous_end) / SAMPLE_RATE + 2 * PADDING  # both pieces carry padding
+            text = join_pieces(text, piece, hesitation=pause >= HESITATION)
+            first_language = first_language or language
+        previous_end = end
+    return text, first_language
+
+
+def missed_speech(voice, audio, covered):
+    """Where to cut a piece so the speech Whisper skipped gets its own turn ([] if none).
+
+    `covered` is the (start, end) seconds the text came from; any stretch
+    outside them holding more than MISSED_SPEECH seconds of speech was skipped.
+    """
+    edges = [0] + [int(t * SAMPLE_RATE) for span in covered for t in span] + [len(audio)]
+    cuts = []
+    for gap_start, gap_end in zip(edges[::2], edges[1::2]):  # the stretches between covered ones
+        if gap_end - gap_start < MISSED_SPEECH * SAMPLE_RATE:
+            continue
+        speech = sum(span["end"] - span["start"] for span in voice.spans(audio[gap_start:gap_end]))
+        if speech > MISSED_SPEECH * SAMPLE_RATE:
+            cuts += [edge for edge in (gap_start, gap_end) if 0 < edge < len(audio)]
+    return sorted(set(cuts))
 
 
 class LivePreview:
@@ -344,22 +391,8 @@ class Parole(rumps.App):
                 AppHelper.callAfter(self.bubble.hide)
 
     def transcribe_speech(self, audio, before=""):
-        """Transcribe the speech in `audio` (any length), continuing the text `before`.
-
-        Returns (all the text, language of the first new piece). The audio is
-        cut at pauses; join_pieces glues the pieces back, keeping a sentence
-        going through a pause and writing a long one as "...".
-        """
-        prompt, text, language = self.vocabulary.prompt(extra=self.context.terms), before, None
-        previous_end = 0  # `audio` starts right after the text `before`
-        for start, end in self.voice.speech_pieces(audio):
-            piece, piece_language = self.transcriber.transcribe(audio[start:end], prompt)
-            if piece:
-                pause = (start - previous_end) / SAMPLE_RATE + 2 * PADDING  # both pieces carry padding
-                text = join_pieces(text, piece, hesitation=pause >= HESITATION)
-                language = language or piece_language
-            previous_end = end
-        return text, language
+        prompt = self.vocabulary.prompt(extra=self.context.terms)
+        return transcribe_speech(self.transcriber, self.voice, audio, prompt, before)
 
     def tidy(self, text):
         if self.repeats_item.state:
@@ -377,7 +410,7 @@ class Parole(rumps.App):
         if not spans:
             return
         speech_end = spans[-1]["end"]
-        if len(rest) - speech_end > MAX_GAP * SAMPLE_RATE or speech_end > MAX_PENDING * SAMPLE_RATE:
+        if len(rest) - speech_end > PAUSE * SAMPLE_RATE or speech_end > MAX_PENDING * SAMPLE_RATE:
             # A pause: transcribe what came before it for good and never look at
             # it again, so the end of a long dictation has little left to do.
             end = min(len(rest), speech_end + int(PADDING * SAMPLE_RATE))

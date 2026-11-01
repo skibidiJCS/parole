@@ -21,7 +21,7 @@ This only catches *exact* repeats. Rephrasing in different words
 
 import re
 
-MAX_PHRASE = 6  # longest phrase (in words) we look for repeats of
+MAX_PHRASE = 10  # longest phrase (in words) we look for repeats of
 # Words that are legitimately doubled ("nous nous sommes", "he had had").
 KEEP_DOUBLED = {"nous", "vous", "had", "that", "is", "very", "so", "no", "non", "oui", "yes", "ha", "haha", "bye"}
 # "w-what", "b-but", "th-the": a 1-2 letter fragment glued to the word it starts.

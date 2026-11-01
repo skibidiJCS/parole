@@ -18,7 +18,8 @@ from silero_vad import get_speech_timestamps, load_silero_vad
 from recorder import SAMPLE_RATE
 
 PADDING = 0.2  # seconds kept around speech so first/last sounds aren't clipped
-MAX_GAP = 0.6  # seconds; a longer pause starts a new piece
+MAX_GAP = 0.6  # seconds between padded spans; a longer gap starts a new piece
+PAUSE = MAX_GAP + 2 * PADDING  # the silence that actually separates two pieces (1 s)
 MAX_CHUNK = 28  # seconds per piece; Whisper's window is 30
 
 
