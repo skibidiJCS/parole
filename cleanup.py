@@ -20,7 +20,7 @@ This only catches *exact* repeats. Rephrasing in different words
 ("I think, I believe…") needs a language model (roadmap phase 6).
 
 Self-corrections are found by what you say to fix a slip: "sorry", "I mean",
-"no wait", "pardon", "je veux dire"... set off by punctuation, so "I'm sorry"
+"I meant", "no wait", "pardon", "je veux dire", "je voulais dire"... set off by punctuation, so "I'm sorry"
 is left alone. What you say next replaces what you said just before it; see
 apply_corrections for how much. "Scratch that" / "oublie ça" drops the
 whole sentence before it.
@@ -171,19 +171,22 @@ def join_pieces(before, after, hesitation=True):
 # What you say to correct yourself. Whisper puts punctuation before it
 # ("Tuesday, sorry, Wednesday"), which is what tells it apart from "I'm sorry".
 MARKER = (
-    r"(?:no,? )?sorry|no,? wait|wait,? no|i mean|or rather|"
-    r"(?:non,? )?pardon|non,? attends|je veux dire|ou plutôt|"
+    r"(?:no,? )?sorry|no,? wait|wait,? no|i mean(?:t)?(?: to say)?|or rather|"
+    r"(?:non,? )?pardon|non,? attends|je veux dire|je voulais dire|ou plutôt|"
     r"scratch that|forget that|oublie ça|efface ça"
 )
+# Whisper often hears "sorry, I meant" as "sorry, I'm at": only counted after another marker.
+MISHEARD_MARKER = r"i'?m at"
 # One or more markers in a row ("Wait no, I mean Wednesday"), after punctuation.
 CORRECTION = re.compile(
-    rf"(?P<lead>[,.;…—?!]|\s-)\s*(?P<markers>(?:(?:{MARKER})[,.;!]?\s+)+)(?=\w)",
+    rf"(?P<lead>[,.;…—?!]|\s-)\s*"
+    rf"(?P<markers>(?:{MARKER})[,.;!]?\s+(?:(?:{MARKER}|{MISHEARD_MARKER})[,.;!]?\s+)*)(?=\w)",
     re.IGNORECASE,
 )
 SCRATCH = {"scratch that", "forget that", "oublie ça", "efface ça"}
 # Weak markers are often just talk ("It's good, I mean, it works"): only act
 # when what follows clearly restates something you just said.
-WEAK = {"i mean", "or rather", "je veux dire", "ou plutôt"}
+WEAK = {"i mean", "i meant", "i mean to say", "i meant to say", "im at", "or rather", "je veux dire", "je voulais dire", "ou plutôt"}
 LOOK_BACK = 6  # words; how far back the restated word can be
 # A correction starting like a new clause ("Hey, sorry, I missed your call")
 # is an apology, not a one-word swap.
@@ -210,7 +213,8 @@ def apply_corrections(text):
     position = 0
     while match := CORRECTION.search(text, position):
         head, tail = text[: match.start()], text[match.end() :]
-        markers = {" ".join(m.lower().replace(",", "").split()) for m in re.findall(MARKER, match.group("markers"), re.IGNORECASE)}
+        found = re.findall(f"{MARKER}|{MISHEARD_MARKER}", match.group("markers"), re.IGNORECASE)
+        markers = {" ".join(m.lower().replace(",", "").replace("'", "").split()) for m in found}
         lead = match.group("lead")
         cut = _correction_start(head, tail, markers, after_sentence=lead in ".…?!")
         if cut is None:  # not a correction after all
@@ -240,7 +244,10 @@ def _correction_start(head, tail, markers, after_sentence):
         return None
     first_word = tail.split()[0].strip(".,;:!?")
     first = normalise(first_word)
-    for word in reversed(words[-LOOK_BACK:]):
+    # A pronoun restated after a sentence end is a new sentence: "It was fine. I meant it."
+    # ("on" is also English: "Tuesday. Sorry, on Wednesday." restarts at "on".)
+    pronoun = after_sentence and first in NEW_CLAUSE - {"on"}
+    for word in reversed([] if pronoun else words[-LOOK_BACK:]):
         if normalise(word.group()) == first:
             return clause + word.start()  # "on Tuesday, sorry, on Wednesday": restart at "on"
     # No restated word: only a one-word swap is safe to guess.
@@ -248,7 +255,7 @@ def _correction_start(head, tail, markers, after_sentence):
     addressed = re.match(r"\S+,", tail)  # "Friday. Sorry, Mark, I forgot": talking to Mark
     if first not in NEW_CLAUSE and not addressed and clause + last.start() not in sentences and _alike(last.group(), first_word):
         return clause + last.start()  # like for like: "on Friday? Wait no, I mean Wednesday."
-    if markers <= WEAK or after_sentence or first in NEW_CLAUSE:
+    if markers & WEAK or after_sentence or first in NEW_CLAUSE:
         return None  # "It's good, I mean, it works"; "I'm late. Sorry, I'll hurry"
     if first in OPEN_ENDINGS or first in PREPOSITIONS:
         return None  # "on the desktop, sorry, in Downloads": can't tell how much "in ..." replaces
