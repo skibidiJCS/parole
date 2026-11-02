@@ -9,7 +9,8 @@ punctuation; not at the start of a field, after a space or newline, or after
 an opening bracket.
 
 Some apps (VS Code, some web pages) don't answer. Then we fall back to:
-"did the previous dictation go into this same app less than a minute ago?"
+"did the previous dictation go into this same app less than a minute ago,
+without a space after it?" (context.space_after usually adds one already.)
 """
 
 import time
@@ -49,6 +50,7 @@ class Spacer:
     def __init__(self):
         self._last_app = None
         self._last_time = 0.0
+        self._ended_with_space = False
 
     def prefix(self):
         """Return " " if the next dictation should start with a space, else ""."""
@@ -59,9 +61,10 @@ class Spacer:
         if before is not None:
             return " " if wants_space(before) else ""
         recent = time.monotonic() - self._last_time < RECENT_SECONDS
-        return " " if recent and frontmost_app() == self._last_app else ""
+        return " " if recent and frontmost_app() == self._last_app and not self._ended_with_space else ""
 
-    def pasted(self):
+    def pasted(self, text):
         """Remember where and when the dictation went, for the fallback."""
         self._last_app = frontmost_app()
         self._last_time = time.monotonic()
+        self._ended_with_space = text[-1:].isspace()

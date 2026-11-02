@@ -1,7 +1,8 @@
-"""Tidy a transcript: filler words, stutters, repeats, and pauses.
+"""Tidy a transcript: filler words, stutters, repeats, self-corrections, and pauses.
 
     "Um, I- I think we should, we should leave."  ->  "I think we should leave."
     "Je je pense que, euh, je pense que c'est bon." ->  "Je pense que c'est bon."
+    "Let's meet on Tuesday, sorry, on Wednesday."  ->  "Let's meet on Wednesday."
     pieces "I think we should." + "go tomorrow."    ->  "I think we should... go tomorrow."
 
 Fillers ("um", "euh"...) are dropped wherever they are; "like", "you know",
@@ -17,6 +18,12 @@ copy's capital letter is moved onto it.
 
 This only catches *exact* repeats. Rephrasing in different words
 ("I think, I believe…") needs a language model (roadmap phase 6).
+
+Self-corrections are found by what you say to fix a slip: "sorry", "I mean",
+"no wait", "pardon", "je veux dire"... set off by punctuation, so "I'm sorry"
+is left alone. What you say next replaces what you said just before it; see
+apply_corrections for how much. "Scratch that" / "oublie ça" drops the
+whole sentence before it.
 """
 
 import re
@@ -159,3 +166,80 @@ def join_pieces(before, after, hesitation=True):
     if before[-1:].isalnum():
         before += "."  # Whisper sometimes leaves the last sentence open
     return before + " " + after
+
+
+# What you say to correct yourself. Whisper puts punctuation before it
+# ("Tuesday, sorry, Wednesday"), which is what tells it apart from "I'm sorry".
+CORRECTION = re.compile(
+    r"(?P<lead>[,.;…—]|\s-)\s*"
+    r"(?P<marker>(?:no,? )?sorry|no,? wait|wait,? no|i mean|or rather|"
+    r"(?:non,? )?pardon|non,? attends|je veux dire|ou plutôt|"
+    r"scratch that|forget that|oublie ça|efface ça)"
+    r"[,.;!]?\s+(?=\w)",
+    re.IGNORECASE,
+)
+SCRATCH = {"scratch that", "forget that", "oublie ça", "efface ça"}
+# Weak markers are often just talk ("It's good, I mean, it works"): only act
+# when what follows clearly restates something you just said.
+WEAK = {"i mean", "or rather", "je veux dire", "ou plutôt"}
+LOOK_BACK = 6  # words; how far back the restated word can be
+# A correction starting like a new clause ("Hey, sorry, I missed your call")
+# is an apology, not a one-word swap.
+NEW_CLAUSE = set("""
+i i'm i'll i've i'd we we're you you're he she it it's they they're that's there's this
+je j'ai j'suis tu il elle on nous vous ils elles c'est ça
+""".split())
+PREPOSITIONS = set("in on at up out over under near next this that these those".split())  # beyond OPEN_ENDINGS
+SENTENCE_START = re.compile(r"(?:^|(?<=[.!?])\s+)(?=\S)")
+CLAUSE_START = re.compile(r"(?:^|(?<=[.!?,;:])\s+)(?=\S)")
+
+
+def apply_corrections(text):
+    """Replace what you corrected with the correction.
+
+    How far back the correction reaches:
+      - if it starts with a word you said shortly before (in the same clause),
+        it restarts from there: "meet on Tuesday, sorry, on Wednesday" -> "meet on Wednesday";
+      - otherwise it replaces just the last word: "meet Tuesday, sorry, Wednesday" -> "meet Wednesday";
+      - "scratch that" drops the sentence before it.
+    """
+    position = 0
+    while match := CORRECTION.search(text, position):
+        head, tail = text[: match.start()], text[match.end() :]
+        marker = " ".join(match.group("marker").lower().replace(",", "").split())
+        cut = _correction_start(head, tail, marker, after_sentence=match.group("lead") in ".…")
+        if cut is None:  # not a correction after all
+            position = match.end()
+            continue
+        if cut == 0 or head[:cut].rstrip()[-1:] in ".!?":  # the correction now starts a sentence
+            tail = tail[:1].upper() + tail[1:]
+        text = head[:cut] + tail
+        position = cut
+    return text
+
+
+def _correction_start(head, tail, marker, after_sentence):
+    """Where in `head` the corrected words start, or None to leave the text alone."""
+    sentences = [m.start() for m in SENTENCE_START.finditer(head)]
+    if not sentences:
+        return None  # "Sorry, I'm late": nothing before it to correct
+    if marker in SCRATCH:
+        return sentences[-1]
+    # Words of the clause just before the marker; if the marker opens a new
+    # sentence ("Tuesday. Sorry, Wednesday."), that previous sentence's last clause.
+    clause = [m.start() for m in CLAUSE_START.finditer(head)][-1]
+    words = list(re.finditer(r"\S+", head[clause:]))
+    if not words:
+        return None
+    first = normalise(tail.split()[0])
+    for word in reversed(words[-LOOK_BACK:]):
+        if normalise(word.group()) == first:
+            return clause + word.start()  # "on Tuesday, sorry, on Wednesday": restart at "on"
+    # No restated word: only a plain one-word swap is safe to guess.
+    if marker in WEAK or after_sentence or first in NEW_CLAUSE:
+        return None  # "It's good, I mean, it works"; "I'm late. Sorry, I'll hurry"
+    if first in OPEN_ENDINGS or first in PREPOSITIONS:
+        return None  # "on the desktop, sorry, in Downloads": can't tell how much "in ..." replaces
+    if normalise(words[-1].group()) in OPEN_ENDINGS:
+        return None  # "I went to, sorry, the shop" is a hesitation, not a slip
+    return clause + words[-1].start()  # "Tuesday, sorry, Wednesday": swap the last word

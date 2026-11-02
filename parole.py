@@ -38,7 +38,7 @@ from PyObjCTools import AppHelper
 
 import context
 from bubble import Bubble
-from cleanup import join_pieces, remove_fillers, remove_repeats
+from cleanup import apply_corrections, join_pieces, remove_fillers, remove_repeats
 from hotkey import Shortcut
 from learning import Learner
 from paster import paste_text
@@ -152,7 +152,7 @@ class Parole(rumps.App):
         self.last_item = rumps.MenuItem("No dictation yet")
         self.fast_item = rumps.MenuItem("Fast mode", callback=self.toggle_fast)
         self.fast_item.state = True
-        self.repeats_item = rumps.MenuItem("Remove fillers & repeats", callback=self.toggle_repeats)
+        self.repeats_item = rumps.MenuItem("Clean up fillers, repeats & corrections", callback=self.toggle_repeats)
         self.repeats_item.state = True
         self.live_item = rumps.MenuItem("Live preview", callback=self.toggle_live)
         self.live_item.state = True
@@ -230,7 +230,7 @@ class Parole(rumps.App):
 
     def toggle_repeats(self, item):
         item.state = not item.state
-        log(f"Remove fillers & repeats {'on' if item.state else 'off'}")
+        log(f"Clean up {'on' if item.state else 'off'}")
 
     def toggle_live(self, item):
         item.state = not item.state
@@ -396,7 +396,8 @@ class Parole(rumps.App):
 
     def tidy(self, text):
         if self.repeats_item.state:
-            text = remove_repeats(remove_fillers(text))  # "Um, I- I think" -> "I think"
+            # "Um, I- I think" -> "I think"; "Tuesday, sorry, Wednesday" -> "Wednesday"
+            text = remove_repeats(apply_corrections(remove_fillers(text)))
         return self.vocabulary.fix(text)
 
     def refresh_live(self):
@@ -465,8 +466,9 @@ class Parole(rumps.App):
             text = context.fit(text, here, names=self.vocabulary.words())  # "go home" mid-sentence, no "." in a search box...
             self.last_text = text
             self.learner.finish()  # last look at the previous dictation before this one lands
-            paste_sent_at = paste_text(self.spacer.prefix() + text)
-            self.spacer.pasted()
+            pasted = self.spacer.prefix() + text + context.space_after(text, here)
+            paste_sent_at = paste_text(pasted)
+            self.spacer.pasted(pasted)
             if self.learn_item.state:
                 self.learner.watch(here, text)
         except Exception as error:
