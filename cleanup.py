@@ -170,12 +170,14 @@ def join_pieces(before, after, hesitation=True):
 
 # What you say to correct yourself. Whisper puts punctuation before it
 # ("Tuesday, sorry, Wednesday"), which is what tells it apart from "I'm sorry".
-CORRECTION = re.compile(
-    r"(?P<lead>[,.;…—]|\s-)\s*"
-    r"(?P<marker>(?:no,? )?sorry|no,? wait|wait,? no|i mean|or rather|"
+MARKER = (
+    r"(?:no,? )?sorry|no,? wait|wait,? no|i mean|or rather|"
     r"(?:non,? )?pardon|non,? attends|je veux dire|ou plutôt|"
-    r"scratch that|forget that|oublie ça|efface ça)"
-    r"[,.;!]?\s+(?=\w)",
+    r"scratch that|forget that|oublie ça|efface ça"
+)
+# One or more markers in a row ("Wait no, I mean Wednesday"), after punctuation.
+CORRECTION = re.compile(
+    rf"(?P<lead>[,.;…—?!]|\s-)\s*(?P<markers>(?:(?:{MARKER})[,.;!]?\s+)+)(?=\w)",
     re.IGNORECASE,
 )
 SCRATCH = {"scratch that", "forget that", "oublie ça", "efface ça"}
@@ -200,30 +202,35 @@ def apply_corrections(text):
     How far back the correction reaches:
       - if it starts with a word you said shortly before (in the same clause),
         it restarts from there: "meet on Tuesday, sorry, on Wednesday" -> "meet on Wednesday";
-      - otherwise it replaces just the last word: "meet Tuesday, sorry, Wednesday" -> "meet Wednesday";
+      - otherwise it replaces just the last word: "meet Tuesday, sorry, Wednesday" -> "meet Wednesday",
+        even across a sentence end when both are the same kind of word (days, months,
+        numbers, names): "on Friday? Wait no, I mean Wednesday." -> "on Wednesday?";
       - "scratch that" drops the sentence before it.
     """
     position = 0
     while match := CORRECTION.search(text, position):
         head, tail = text[: match.start()], text[match.end() :]
-        marker = " ".join(match.group("marker").lower().replace(",", "").split())
-        cut = _correction_start(head, tail, marker, after_sentence=match.group("lead") in ".…")
+        markers = {" ".join(m.lower().replace(",", "").split()) for m in re.findall(MARKER, match.group("markers"), re.IGNORECASE)}
+        lead = match.group("lead")
+        cut = _correction_start(head, tail, markers, after_sentence=lead in ".…?!")
         if cut is None:  # not a correction after all
             position = match.end()
             continue
         if cut == 0 or head[:cut].rstrip()[-1:] in ".!?":  # the correction now starts a sentence
             tail = tail[:1].upper() + tail[1:]
+        if lead in "?!" and not markers & SCRATCH:  # "on Friday? Wait no, Wednesday." is still a question
+            tail = re.sub(r"\.(?=\s|$)", lead, tail, count=1)
         text = head[:cut] + tail
         position = cut
     return text
 
 
-def _correction_start(head, tail, marker, after_sentence):
+def _correction_start(head, tail, markers, after_sentence):
     """Where in `head` the corrected words start, or None to leave the text alone."""
     sentences = [m.start() for m in SENTENCE_START.finditer(head)]
     if not sentences:
         return None  # "Sorry, I'm late": nothing before it to correct
-    if marker in SCRATCH:
+    if markers & SCRATCH:
         return sentences[-1]
     # Words of the clause just before the marker; if the marker opens a new
     # sentence ("Tuesday. Sorry, Wednesday."), that previous sentence's last clause.
@@ -231,15 +238,37 @@ def _correction_start(head, tail, marker, after_sentence):
     words = list(re.finditer(r"\S+", head[clause:]))
     if not words:
         return None
-    first = normalise(tail.split()[0])
+    first_word = tail.split()[0].strip(".,;:!?")
+    first = normalise(first_word)
     for word in reversed(words[-LOOK_BACK:]):
         if normalise(word.group()) == first:
             return clause + word.start()  # "on Tuesday, sorry, on Wednesday": restart at "on"
-    # No restated word: only a plain one-word swap is safe to guess.
-    if marker in WEAK or after_sentence or first in NEW_CLAUSE:
+    # No restated word: only a one-word swap is safe to guess.
+    last = words[-1]
+    addressed = re.match(r"\S+,", tail)  # "Friday. Sorry, Mark, I forgot": talking to Mark
+    if first not in NEW_CLAUSE and not addressed and clause + last.start() not in sentences and _alike(last.group(), first_word):
+        return clause + last.start()  # like for like: "on Friday? Wait no, I mean Wednesday."
+    if markers <= WEAK or after_sentence or first in NEW_CLAUSE:
         return None  # "It's good, I mean, it works"; "I'm late. Sorry, I'll hurry"
     if first in OPEN_ENDINGS or first in PREPOSITIONS:
         return None  # "on the desktop, sorry, in Downloads": can't tell how much "in ..." replaces
     if normalise(words[-1].group()) in OPEN_ENDINGS:
         return None  # "I went to, sorry, the shop" is a hesitation, not a slip
     return clause + words[-1].start()  # "Tuesday, sorry, Wednesday": swap the last word
+
+
+DAYS = set("""monday tuesday wednesday thursday friday saturday sunday today tomorrow tonight yesterday
+lundi mardi mercredi jeudi vendredi samedi dimanche aujourd'hui demain hier""".split())
+MONTHS = set("""january february march april may june july august september october november december
+janvier février mars avril mai juin juillet août septembre octobre novembre décembre""".split())
+
+
+def _alike(old, new):
+    """Same kind of word: days ("vendredi" / "mercredi"), months, numbers, or names ("Marc" / "Julie")."""
+    old, new = old.strip(".,;:!?"), new.strip(".,;:!?")
+    for kind in (DAYS, MONTHS):
+        if old.lower() in kind and new.lower() in kind:
+            return True
+    if any(c.isdigit() for c in old) and any(c.isdigit() for c in new):
+        return True
+    return old[:1].isupper() and new[:1].isupper()
