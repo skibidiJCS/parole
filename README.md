@@ -15,7 +15,7 @@ The menu bar mic shows the state (red while recording). Its menu has:
 - **Copy last dictation**: if a paste didn't land.
 - **Edit vocabulary…**: names and jargon, one per line. Add `Jack-eye -> Jiacai` to fix a word that keeps coming out wrong.
 - **Fast mode**: on by default. Turn it off for slightly better accuracy (~1 s per dictation instead of ~0.4 s).
-- **Clean up fillers, repeats & corrections**: drops "um", "euh", "like" (between commas), stutters and phrases said twice. Corrects your slips: "on Tuesday, sorry, on Wednesday" becomes "on Wednesday" (also "no wait", "I mean", "I meant", "pardon", "je veux dire", "je voulais dire"), and "scratch that" / "oublie ça" drops the sentence before it.
+- **Clean up fillers, repeats & corrections**: drops "um", "euh", filler "like" ("I need you to like think"), stutters and phrases said twice. Corrects your slips: "on Tuesday, sorry, on Wednesday" becomes "on Wednesday" (also "no wait", "I mean", "I meant", "pardon", "je veux dire", "je voulais dire"), and "scratch that" / "oublie ça" drops the sentence before it.
 - **Live preview**: the bubble. Turn it off to save battery; dictation still works the same.
 - **Learn from corrections**: fix a misheard word in the text Parole just pasted (say "Jack-eye" to "Jiacai") and leave it for ~10 s. Parole adds `Jack-eye -> Jiacai` to your vocabulary and writes it correctly from then on. Delete the line to undo it.
 

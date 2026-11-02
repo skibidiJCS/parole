@@ -6,7 +6,10 @@
     pieces "I think we should." + "go tomorrow."    ->  "I think we should... go tomorrow."
 
 Fillers ("um", "euh"...) are dropped wherever they are; "like", "you know",
-"genre", "tu vois" only when they sit between commas, so "I like it" stays.
+"genre", "tu vois" when they sit between commas, so "I like it" stays.
+"Like" without commas ("I need you to like think") is dropped when Apple's
+on-device grammar tagger (the NaturalLanguage framework) calls it an
+interjection rather than a verb ("I like it") or a preposition ("looks like rain").
 
 The text is split into words (each keeping its punctuation and the space
 after it). Words are compared in a "normalised" form: lowercase, without
@@ -28,6 +31,16 @@ whole sentence before it.
 
 import re
 
+from NaturalLanguage import (
+    NLTagger,
+    NLTaggerOmitPunctuation,
+    NLTaggerOmitWhitespace,
+    NLTagInterjection,
+    NLTagVerb,
+    NLTagSchemeLexicalClass,
+    NLTokenUnitWord,
+)
+
 MAX_PHRASE = 10  # longest phrase (in words) we look for repeats of
 # Words that are legitimately doubled ("nous nous sommes", "he had had").
 KEEP_DOUBLED = {"nous", "vous", "had", "that", "is", "very", "so", "no", "non", "oui", "yes", "ha", "haha", "bye"}
@@ -41,6 +54,9 @@ FILLER = re.compile(r"^(?:u+h+|u+h*m+|e+r+m*|h+m+|m+h?m+|m+h+|e+u+h+|h+e+u+|h+u+
 # Real words used as fillers when set off by commas: "it was, like, huge".
 COMMA_FILLERS = re.compile(r",\s+(?:like|you know|genre|tu vois),(\s+)", re.IGNORECASE)
 LEADING_LIKE = re.compile(r"(^|[.!?]\s+)like,\s+(\w)", re.IGNORECASE)
+# "I was like, okay" quotes someone: that "like" means "said", so it stays.
+QUOTING = {"was", "were", "is", "am", "are", "i'm", "he's", "she's", "it's", "we're", "they're", "you're"}
+LIKE_I_SAID = re.compile(r"\s*(?:i|you|we|they|he|she) (?:said|say|mean|told)\b", re.IGNORECASE)
 
 
 def ends_sentence(token):
@@ -100,9 +116,10 @@ def _repeat_length(tokens, words, i):
 
 
 def remove_fillers(text):
-    """Drop "um", "euh"... and comma-wrapped "like", "you know", "genre", "tu vois"."""
+    """Drop "um", "euh"..., comma-wrapped "like", "you know", "genre", "tu vois", and filler "like"."""
     text = COMMA_FILLERS.sub(r"\1", text)
     text = LEADING_LIKE.sub(lambda m: m.group(1) + m.group(2).upper(), text)
+    text = remove_filler_like(text)
     kept, capitalize = [], False
     for token in re.findall(r"\S+\s*", text):
         if not FILLER.match(normalise(token)):
@@ -136,6 +153,53 @@ très ne se me te d' l' qu' j'
 # Words that carry a sentence on after a pause ("I went home... and then...").
 LINKING_STARTS = set("and but or so because then which that et mais ou donc parce puis alors qui que".split())
 KEEP_CAPITAL = {"I", "I'm", "I'll", "I've", "I'd"}
+
+
+def remove_filler_like(text):
+    """"I need you to like think" -> "I need you to think"; "So like, what?" -> "So what?"."""
+    for start, end in reversed(_filler_likes(text)):
+        before, after = text[:start], text[end:]
+        previous = normalise((before.split() or [""])[-1])
+        if previous == "like" or normalise((after.split() or [""])[0]) == "like":
+            continue  # "I like like him"
+        if LIKE_I_SAID.match(after) or (after.startswith(",") and previous in QUOTING):
+            continue  # "Like I said, ..."; "I was like, okay"
+        after = re.sub(r"^,?\s*", "", after)
+        if not before.strip() or ends_sentence(before):  # "Like, seriously?" -> "Seriously?"
+            after = after[:1].upper() + after[1:]
+        text = before + after
+    return text
+
+
+def _filler_likes(text):
+    """(start, end) of each "like" used as a filler, according to the tagger.
+
+    Either it calls "like" an interjection, or "like" sits between "to" and a
+    verb in its base form ("able to like use this"; not "used to like going").
+    """
+    tagger = NLTagger.alloc().initWithTagSchemes_([NLTagSchemeLexicalClass])
+    tagger.setString_(text)
+    words = []  # (word, tag, start, end)
+
+    def visit(tag, token_range, stop):
+        start, end = token_range.location, token_range.location + token_range.length
+        words.append((text[start:end], tag, start, end))
+
+    options = NLTaggerOmitWhitespace | NLTaggerOmitPunctuation
+    tagger.enumerateTagsInRange_unit_scheme_options_usingBlock_(
+        (0, len(text)), NLTokenUnitWord, NLTagSchemeLexicalClass, options, visit
+    )
+    found = []
+    for i, (word, tag, start, end) in enumerate(words):
+        # (The ranges count UTF-16 units; an emoji earlier would shift them, so check the word.)
+        if word.lower() != "like":
+            continue
+        previous = words[i - 1][0].lower() if i > 0 else ""
+        following, following_tag = words[i + 1][:2] if i + 1 < len(words) else ("", None)
+        before_verb = previous == "to" and following_tag == NLTagVerb and not following.endswith("ing")
+        if tag == NLTagInterjection or before_verb:
+            found.append((start, end))
+    return found
 
 
 def lowercase_first(text, keep=()):
