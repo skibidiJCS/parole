@@ -2,6 +2,12 @@
 
 The mic stream is opened when recording starts and closed when it stops,
 so between dictations the mic is off (no orange dot, no CPU use).
+
+PortAudio (the library under sounddevice) reads the list of microphones
+once and keeps it. After the Mac sleeps, a USB mic comes back as a new
+device and that list is stale: opening the mic fails, or records the old
+one. So the list is re-read before every recording (about 5 ms), which
+also picks up a mic you just plugged in or chose in System Settings.
 """
 
 import numpy as np
@@ -17,6 +23,8 @@ class Recorder:
 
     def start(self):
         self._chunks = []
+        sd._terminate()  # forget the old device list...
+        sd._initialize()  # ...and read the current one, with the current default mic
         # sounddevice calls _on_audio from its own thread every few milliseconds
         # with the newest block of samples.
         self._stream = sd.InputStream(
