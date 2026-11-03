@@ -6,8 +6,8 @@ just before pasting. It's used three ways:
     added to Whisper's prompt, so it spells them the way the text does;
   - the dictation is fitted in: no capital when you're mid-sentence, no
     final period when the text after the cursor carries on, or in a
-    one-line field like a search box or a subject line; a space after it
-    once a sentence is finished, so you can keep typing or dictating;
+    one-line field like a search box or a subject line; a space after it,
+    so you can keep typing or dictating;
   - learning.py looks at the same spot later to learn your corrections.
 Apps that don't share their text (VS Code, many web pages) get none of this,
 and password fields are never read. The text stays in memory, never logged.
@@ -87,15 +87,11 @@ def fit(text, context, names=()):
     return text
 
 
-def space_after(text, context):
-    """" " if the dictation should be followed by a space, else "".
+def space_after(context):
+    """" " to follow the dictation, so the next one (typed or dictated) starts cleanly.
 
-    After a finished sentence (so the next one, typed or dictated, starts
-    cleanly), or before a word that follows the cursor. Not if a space or
-    punctuation is already there, and not after a search term.
+    Dictations never start with a space, so this one is what separates them.
+    None if a space or punctuation already follows the cursor: "word| next", "word|.".
     """
     following = context.after[:1]
-    if following:
-        return " " if following.isalnum() else ""  # "word|next" needs one; "word| next" or "word|." doesn't
-    finished = text.rstrip("\"'”’»)")[-1:] in ".!?…"
-    return " " if finished and context.role not in SINGLE_LINE else ""
+    return "" if following and not following.isalnum() else " "

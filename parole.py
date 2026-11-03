@@ -43,7 +43,6 @@ from hotkey import Shortcut
 from learning import Learner
 from paster import paste_text
 from recorder import SAMPLE_RATE, Recorder
-from spacing import Spacer
 from transcriber import Transcriber
 from vocabulary import Vocabulary
 from voice import PADDING, PAUSE, VoiceDetector
@@ -187,7 +186,6 @@ class Parole(rumps.App):
         self.voice = None  # loaded by the worker, with Whisper
         self.vocabulary = Vocabulary()
         self.vocabulary.ensure_file()
-        self.spacer = Spacer()
         self.bubble = Bubble()
         self.live = None  # LivePreview while recording with the preview on
         self.context = context.Context()  # the text around the cursor (worker thread only)
@@ -466,9 +464,8 @@ class Parole(rumps.App):
             text = context.fit(text, here, names=self.vocabulary.words())  # "go home" mid-sentence, no "." in a search box...
             self.last_text = text
             self.learner.finish()  # last look at the previous dictation before this one lands
-            pasted = self.spacer.prefix() + text + context.space_after(text, here)
+            pasted = text + context.space_after(here)  # never a space in front: the previous dictation left one
             paste_sent_at = paste_text(pasted)
-            self.spacer.pasted(pasted)
             if self.learn_item.state:
                 self.learner.watch(here, text)
         except Exception as error:

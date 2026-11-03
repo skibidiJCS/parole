@@ -8,7 +8,7 @@ Offline dictation for macOS (Apple Silicon). Speak French or English; the text i
 - **Tap** Shift + Right Command to talk hands-free; tap again to stop.
 
 While you speak, a bubble inside the app you're typing in (under the text cursor) shows your words live.
-The text is pasted once, when you stop, with a space after a finished sentence so you can keep going. A long pause mid-sentence is written "...", and the sentence keeps going.
+The text is pasted once, when you stop, with a space after it so you can keep going. A long pause mid-sentence is written "...", and the sentence keeps going.
 
 The menu bar mic shows the state (red while recording). Its menu has:
 
@@ -53,5 +53,4 @@ To see a live log, run `.venv/bin/python -u parole.py` instead of the app.
 | `learning.py` | learns replacements from your corrections |
 | `ax.py` | asks other apps where their window and text cursor are (Accessibility) |
 | `vocabulary.py` | your words and replacements |
-| `spacing.py` | a space before a dictation when needed |
 | `paster.py` | pastes and restores your clipboard |
