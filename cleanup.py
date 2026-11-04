@@ -295,7 +295,7 @@ def apply_corrections(text):
 
 def _correction_start(head, tail, markers, after_sentence):
     """Where in `head` the corrected words start, or None to leave the text alone."""
-    sentences = [m.start() for m in SENTENCE_START.finditer(head)]
+    sentences = [m.end() for m in SENTENCE_START.finditer(head)]  # each sentence's first letter
     if not sentences:
         return None  # "Sorry, I'm late": nothing before it to correct
     if markers & SCRATCH:
